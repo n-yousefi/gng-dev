@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "GIG Component Inspector",
+  "version": "0.1.0",
+  "description": "DevTools panel for inspecting rendered GIG/GNG Angular component trees.",
+  "devtools_page": "devtools.html",
+  "permissions": [],
+  "host_permissions": []
+}

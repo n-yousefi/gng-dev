@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GIG Components</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <button id="refreshButton" type="button" title="Refresh component tree">Refresh</button>
+      <input id="searchInput" type="search" placeholder="Search selector, class, path, attributes" />
+      <label class="toggle prominent" title="Show only created/app components such as sl-* and app-*; hide GNG/GIG/GSM framework hosts.">
+        <input id="customOnlyToggle" type="checkbox" />
+        <span>Created only</span>
+      </label>
+      <label class="toggle">
+        <input id="showAppToggle" type="checkbox" checked />
+        <span>App</span>
+      </label>
+      <label class="toggle">
+        <input id="showLibraryToggle" type="checkbox" checked />
+        <span>Library</span>
+      </label>
+      <label class="file-picker">
+        <span>Load index</span>
+        <input id="indexFileInput" type="file" accept=".json,application/json" />
+      </label>
+      <span id="statusText" class="status">Idle</span>
+    </header>
+
+    <main class="shell">
+      <aside class="tree-pane">
+        <div class="pane-title">
+          <span>Components</span>
+          <span id="componentCount" class="muted">0</span>
+        </div>
+        <div id="treeRoot" class="tree-root empty">Click Refresh to scan the inspected page.</div>
+      </aside>
+
+      <section class="details-pane">
+        <div id="emptyDetails" class="empty-details">
+          Select a component to inspect its attributes, metadata, and template.
+        </div>
+
+        <div id="detailsContent" class="details-content hidden">
+          <div class="details-header">
+            <div>
+              <h1 id="detailsTitle"></h1>
+              <p id="detailsSubtitle"></p>
+            </div>
+            <div id="detailsBadges" class="badges"></div>
+          </div>
+
+          <nav class="tabs" aria-label="Details tabs">
+            <button class="tab active" type="button" data-tab="overview">Overview</button>
+            <button class="tab" type="button" data-tab="attributes">Attributes</button>
+            <button class="tab" type="button" data-tab="component">Component</button>
+            <button class="tab" type="button" data-tab="template">Template</button>
+            <button class="tab" type="button" data-tab="dom">DOM</button>
+          </nav>
+
+          <section id="tab-overview" class="tab-panel active"></section>
+          <section id="tab-attributes" class="tab-panel"></section>
+          <section id="tab-component" class="tab-panel"></section>
+          <section id="tab-template" class="tab-panel"></section>
+          <section id="tab-dom" class="tab-panel"></section>
+        </div>
+      </section>
+    </main>
+
+    <script src="source-loader.js"></script>
+    <script src="panel.js"></script>
+  </body>
+</html>
+
+
+
