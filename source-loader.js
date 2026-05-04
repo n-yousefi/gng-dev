@@ -83,13 +83,21 @@
   }
 
   async function loadBundledIndex() {
+    const manifest = await loadBundledManifest();
+    return manifest.entries;
+  }
+
+  async function loadBundledManifest() {
     try {
       const response = await fetch(chrome.runtime.getURL('component-index.json'));
-      if (!response.ok) return [];
+      if (!response.ok) return { entries: [], projectRoot: '' };
       const json = await response.json();
-      return Array.isArray(json) ? json : json.components || [];
+      return {
+        entries: Array.isArray(json) ? json : json.components || [],
+        projectRoot: Array.isArray(json) ? '' : normalizePath(json.projectRoot || ''),
+      };
     } catch (_error) {
-      return [];
+      return { entries: [], projectRoot: '' };
     }
   }
 
@@ -99,5 +107,6 @@
     getSelectorFamily,
     isCreatedComponent,
     loadBundledIndex,
+    loadBundledManifest,
   };
 })(window);

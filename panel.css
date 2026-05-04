@@ -333,6 +333,39 @@ input {
   word-break: break-word;
 }
 
+.cell-value {
+  white-space: pre-wrap;
+}
+
+.row-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.icon-button {
+  min-height: 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--muted);
+  padding: 1px 5px;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.copy-button {
+  margin-left: 6px;
+}
+
 .section-title {
   margin: 0 0 8px;
   font-size: 13px;

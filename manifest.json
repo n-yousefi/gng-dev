@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "description": "DevTools panel for inspecting rendered GIG/GNG Angular component trees.",
   "devtools_page": "devtools.html",
-  "permissions": [],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["contextMenus"],
   "host_permissions": []
 }

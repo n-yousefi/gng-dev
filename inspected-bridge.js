@@ -1,6 +1,7 @@
 (function installGigComponentInspector() {
   const GLOBAL_KEY = '__gigComponentInspector';
   const VERSION = 1;
+  const DEFAULT_PREFIXES = ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
 
   function safeString(value, maxLength = 300) {
     if (value == null) return '';
@@ -61,6 +62,7 @@
       directiveNames: [],
       inputs: {},
       componentInstanceSummary: {},
+      componentProperties: {},
     };
 
     try {
@@ -68,6 +70,7 @@
       if (component) {
         metadata.componentClassName = component.constructor?.name || null;
         metadata.componentInstanceSummary = summarizeInstance(component);
+        metadata.componentProperties = summarizeProperties(component);
       }
     } catch (error) {
       metadata.componentError = safeString(error?.message || error);
@@ -86,6 +89,44 @@
     }
 
     return metadata;
+  }
+
+  function summarizeProperties(instance) {
+    const result = {};
+    const seen = new Set();
+    let current = instance;
+    let depth = 0;
+
+    while (current && current !== Object.prototype && depth < 3) {
+      for (const key of Object.getOwnPropertyNames(current).slice(0, 160)) {
+        if (seen.has(key) || key === 'constructor' || key.startsWith('_')) continue;
+        seen.add(key);
+
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (!descriptor || typeof descriptor.value === 'function') continue;
+
+        try {
+          const value = descriptor.get ? instance[key] : descriptor.value;
+          const summary = summarizeValue(value, 0);
+          if (summary !== undefined) {
+            result[key] = {
+              source: current === instance ? 'instance' : 'prototype',
+              value: summary,
+            };
+          }
+        } catch (error) {
+          result[key] = {
+            source: current === instance ? 'instance' : 'prototype',
+            error: safeString(error?.message || error),
+          };
+        }
+      }
+
+      current = Object.getPrototypeOf(current);
+      depth++;
+    }
+
+    return result;
   }
 
   function summarizeInstance(instance) {
@@ -151,6 +192,7 @@
       directiveNames: angular.directiveNames,
       hasAngularDebugApi: angular.hasAngularDebugApi,
       componentInstanceSummary: angular.componentInstanceSummary,
+      componentProperties: angular.componentProperties,
       debugErrors: {
         component: angular.componentError,
         directives: angular.directiveError,
@@ -188,7 +230,7 @@
   }
 
   function scan(options = {}) {
-    const prefixes = options.prefixes || ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
+    const prefixes = options.prefixes || DEFAULT_PREFIXES;
     const elements = new Map();
     const idByElement = new WeakMap();
     const candidates = Array.from(document.querySelectorAll('*')).filter(element => matchesPrefixes(element, prefixes));
@@ -226,12 +268,62 @@
     return { ok: true };
   }
 
+  function rememberContextElement(event) {
+    window[GLOBAL_KEY].lastContextElement = event.target instanceof Element ? event.target : null;
+  }
+
+  function findNearestComponentElement(start, prefixes = DEFAULT_PREFIXES) {
+    let current = start instanceof Element ? start : null;
+    while (current) {
+      if (matchesPrefixes(current, prefixes)) return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function getIdForElement(element) {
+    for (const [id, candidate] of window[GLOBAL_KEY].elements || []) {
+      if (candidate === element) return id;
+    }
+    return null;
+  }
+
+  function selectLastContextComponent(options = {}) {
+    const componentElement = findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, options.prefixes || DEFAULT_PREFIXES);
+    if (!componentElement) {
+      return { ok: false, message: 'No component host was found for the last right-clicked element.' };
+    }
+
+    const id = getIdForElement(componentElement);
+    if (!id) {
+      return {
+        ok: false,
+        needsRefresh: true,
+        selector: componentElement.tagName.toLowerCase(),
+        elementPath: getElementPath(componentElement),
+        message: 'Component exists, but it is not in the current scan. Refreshing can link it.',
+      };
+    }
+
+    return {
+      ok: true,
+      id,
+      selector: componentElement.tagName.toLowerCase(),
+      elementPath: getElementPath(componentElement),
+    };
+  }
+
   window[GLOBAL_KEY] = {
     version: VERSION,
     elements: new Map(),
+    lastContextElement: null,
     scan,
     inspectElementById,
+    selectLastContextComponent,
   };
+
+  document.removeEventListener('contextmenu', rememberContextElement, true);
+  document.addEventListener('contextmenu', rememberContextElement, true);
 
   return window[GLOBAL_KEY];
 })();

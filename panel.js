@@ -24,6 +24,7 @@ const state = {
   selectedId: null,
   sourceIndex: new Map(),
   loadedIndexCount: 0,
+  projectRoot: '',
 };
 
 init();
@@ -31,13 +32,21 @@ init();
 async function init() {
   bindEvents();
   setStatus('Loading source index...');
-  const bundledEntries = await window.GIGSourceLoader.loadBundledIndex();
+  const bundledManifest = await window.GIGSourceLoader.loadBundledManifest();
+  const bundledEntries = bundledManifest.entries;
   if (bundledEntries.length) {
     state.sourceIndex = window.GIGSourceLoader.createIndex(bundledEntries);
     state.loadedIndexCount = bundledEntries.length;
+    state.projectRoot = bundledManifest.projectRoot || '';
     setStatus(`Loaded ${bundledEntries.length} indexed components.`);
   } else {
     setStatus('Ready. Load an index for template source, then refresh.');
+  }
+
+  try {
+    await ensureBridge();
+  } catch (_error) {
+    state.bridgeInjected = false;
   }
 }
 
@@ -52,6 +61,12 @@ function bindEvents() {
   els.showAppToggle.addEventListener('change', () => applyTreeFilters());
   els.showLibraryToggle.addEventListener('change', () => applyTreeFilters());
   els.indexFileInput.addEventListener('change', handleIndexFileSelected);
+  els.detailsContent.addEventListener('click', handleDetailsClick);
+  chrome.runtime?.onMessage?.addListener(message => {
+    if (message?.type === 'gig-context-inspect' && message.tabId === chrome.devtools.inspectedWindow.tabId) {
+      selectLastRightClickedComponent();
+    }
+  });
 
   for (const tab of els.tabs) {
     tab.addEventListener('click', () => activateTab(tab.dataset.tab));
@@ -67,6 +82,7 @@ async function handleIndexFileSelected(event) {
     const entries = Array.isArray(json) ? json : json.components || [];
     state.sourceIndex = window.GIGSourceLoader.createIndex(entries);
     state.loadedIndexCount = entries.length;
+    state.projectRoot = Array.isArray(json) ? '' : normalizePath(json.projectRoot || '');
     setStatus(`Loaded ${entries.length} indexed components from ${file.name}.`);
     applyTreeFilters();
     if (state.selectedId) renderDetails(state.flatById.get(state.selectedId));
@@ -100,7 +116,11 @@ async function refresh() {
 }
 
 async function ensureBridge() {
-  if (state.bridgeInjected) return;
+  if (state.bridgeInjected) {
+    const existing = await evalInInspectedPage('Boolean(window.__gigComponentInspector?.scan)');
+    if (existing) return;
+    state.bridgeInjected = false;
+  }
   const bridgeUrl = chrome.runtime.getURL('inspected-bridge.js');
   const bridgeCode = await fetch(bridgeUrl).then(response => response.text());
   await evalInInspectedPage(bridgeCode);
@@ -260,8 +280,8 @@ function renderOverview(node, sourceResult) {
       ${row('Runtime kind', node.kind)}
       ${row('Source class', source.className || 'Not indexed')}
       ${row('Runtime class', node.componentClassName || 'Not available')}
-      ${row('Component .ts', source.componentTs || 'Not indexed')}
-      ${row('Template .html', source.templateUrl || 'Not indexed')}
+      ${pathRow('Component .ts', source.componentTs)}
+      ${pathRow('Template .html', source.templateUrl)}
       ${row('Component folder', source.componentDir || 'Not indexed')}
       ${row('Route/page hint', source.routeHint || 'Not indexed')}
       ${row('Search hint', searchHint || node.selector)}
@@ -295,6 +315,8 @@ function renderComponentInfo(node, sourceResult) {
   parts.push(renderArray(node.directiveNames, 'No directive metadata available.'));
   parts.push('<h2 class="section-title">Safe Component Instance Summary</h2>');
   parts.push(renderObjectTable(node.componentInstanceSummary, 'No component instance summary available.'));
+  parts.push('<h2 class="section-title">Component Properties</h2>');
+  parts.push(renderObjectTable(node.componentProperties, 'No component properties available.'));
   if (node.debugErrors?.component || node.debugErrors?.directives) {
     parts.push('<h2 class="section-title">Debug API Errors</h2>');
     parts.push(renderObjectTable(node.debugErrors, 'No errors.'));
@@ -304,12 +326,11 @@ function renderComponentInfo(node, sourceResult) {
 
 function renderTemplate(sourceResult) {
   const source = sourceResult.source || {};
-  const path = source.templateUrl || 'Unknown template path';
   const componentPath = source.componentTs || '';
   const header = `
     <table class="kv source-summary">
-      ${row('Component .ts', componentPath || 'Not indexed')}
-      ${row('Template .html', path)}
+      ${pathRow('Component .ts', componentPath)}
+      ${pathRow('Template .html', source.templateUrl)}
     </table>
   `;
   if (source.templateHtml) {
@@ -347,7 +368,143 @@ function formatValue(value) {
 }
 
 function row(key, value) {
-  return `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(value)}</td></tr>`;
+  const text = formatValue(value);
+  return `
+    <tr>
+      <th>${escapeHtml(key)}</th>
+      <td>
+        <span class="cell-value">${escapeHtml(text)}</span>
+        ${copyButton(text)}
+      </td>
+    </tr>
+  `;
+}
+
+function pathRow(key, value) {
+  const text = value || 'Not indexed';
+  return `
+    <tr>
+      <th>${escapeHtml(key)}</th>
+      <td>
+        <span class="cell-value">${escapeHtml(text)}</span>
+        <span class="row-actions">
+          ${copyButton(text)}
+          ${pathActionButtons(value)}
+        </span>
+      </td>
+    </tr>
+  `;
+}
+
+function copyButton(value) {
+  if (!value) return '';
+  return `<button class="icon-button copy-button" type="button" data-copy-value="${escapeHtml(value)}" title="Copy value">Copy</button>`;
+}
+
+function pathActionButtons(path) {
+  if (!path) return '';
+  const filePath = resolveProjectPath(path);
+  if (!filePath) return '';
+  const folderPath = getDirectoryPath(filePath);
+  return `
+    <button class="icon-button" type="button" data-open-folder="${escapeHtml(folderPath)}" title="Open directory">Folder</button>
+    <button class="icon-button" type="button" data-open-vscode="${escapeHtml(filePath)}" title="Open in VS Code">VS Code</button>
+  `;
+}
+
+async function handleDetailsClick(event) {
+  const target = event.target.closest('button');
+  if (!target) return;
+
+  if (target.dataset.copyValue !== undefined) {
+    await copyText(target.dataset.copyValue);
+    setStatus('Copied value.');
+    return;
+  }
+
+  if (target.dataset.openFolder) {
+    openExternalUrl(pathToFileUrl(target.dataset.openFolder));
+    setStatus('Opened component directory.');
+    return;
+  }
+
+  if (target.dataset.openVscode) {
+    openExternalUrl(`vscode://file/${target.dataset.openVscode.replace(/\\/g, '/')}`);
+    setStatus('Opening file in VS Code.');
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+function openExternalUrl(url) {
+  if (chrome.tabs?.create) {
+    chrome.tabs.create({ url });
+    return;
+  }
+  window.open(url, '_blank', 'noopener');
+}
+
+async function selectLastRightClickedComponent() {
+  try {
+    await ensureBridge();
+    let result = await evalInInspectedPage(
+      `window.__gigComponentInspector.selectLastContextComponent({ prefixes: ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'] })`
+    );
+
+    if (!result?.ok && result?.needsRefresh) {
+      await refresh();
+      result = await evalInInspectedPage(
+        `window.__gigComponentInspector.selectLastContextComponent({ prefixes: ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'] })`
+      );
+    }
+
+    if (!result?.ok) throw new Error(result?.message || 'Could not find a component for the right-clicked element.');
+    selectNode(result.id);
+    activateTab('overview');
+    setStatus(`Opened ${result.selector} from page right-click.`);
+  } catch (error) {
+    setStatus(error.message || String(error), true);
+  }
+}
+
+function resolveProjectPath(path) {
+  const normalized = normalizePath(path);
+  if (!normalized || normalized === 'Not indexed') return '';
+  if (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith('/')) return normalized;
+  if (!state.projectRoot) return normalized;
+  return `${state.projectRoot.replace(/\/$/, '')}/${normalized}`;
+}
+
+function getDirectoryPath(path) {
+  return normalizePath(path).split('/').slice(0, -1).join('/');
+}
+
+function pathToFileUrl(path) {
+  const normalized = normalizePath(path);
+  const prefix = /^[a-zA-Z]:\//.test(normalized) ? 'file:///' : 'file://';
+  const parts = normalized.split('/').map((part, index) => {
+    if (index === 0 && /^[a-zA-Z]:$/.test(part)) return part;
+    return encodeURIComponent(part);
+  });
+  return `${prefix}${parts.join('/')}`;
+}
+
+function normalizePath(path) {
+  return (path || '').replace(/\\/g, '/');
 }
 
 function activateTab(name) {
