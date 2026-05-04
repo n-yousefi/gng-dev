@@ -10,9 +10,9 @@
     <header class="toolbar">
       <button id="refreshButton" type="button" title="Refresh component tree">Refresh</button>
       <input id="searchInput" type="search" placeholder="Search selector, class, path, attributes" />
-      <label class="toggle prominent" title="Show only created/app components such as sl-* and app-*; hide GNG/GIG/GSM framework hosts.">
-        <input id="customOnlyToggle" type="checkbox" />
-        <span>Created only</span>
+      <label class="toggle prominent" title="Show only app-owned components such as sl-* and app-*; hide GNG/GIG/GSM framework hosts.">
+        <input id="customOnlyToggle" type="checkbox" checked />
+        <span>App only</span>
       </label>
       <label class="toggle">
         <input id="showAppToggle" type="checkbox" checked />
@@ -46,10 +46,12 @@
         <div id="detailsContent" class="details-content hidden">
           <div class="details-header">
             <div>
-              <h1 id="detailsTitle"></h1>
+              <div class="details-title-row">
+                <h1 id="detailsTitle"></h1>
+                <div id="detailsBadges" class="badges"></div>
+              </div>
               <p id="detailsSubtitle"></p>
             </div>
-            <div id="detailsBadges" class="badges"></div>
           </div>
 
           <nav class="tabs" aria-label="Details tabs">

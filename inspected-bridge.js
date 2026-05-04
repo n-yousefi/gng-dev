@@ -289,7 +289,11 @@
   }
 
   function selectLastContextComponent(options = {}) {
-    const componentElement = findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, options.prefixes || DEFAULT_PREFIXES);
+    const preferredPrefixes = options.preferredPrefixes || ['sl-', 'app-'];
+    const fallbackPrefixes = options.prefixes || DEFAULT_PREFIXES;
+    const componentElement =
+      findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, preferredPrefixes) ||
+      findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, fallbackPrefixes);
     if (!componentElement) {
       return { ok: false, message: 'No component host was found for the last right-clicked element.' };
     }

@@ -31,6 +31,7 @@ init();
 
 async function init() {
   bindEvents();
+  syncFilterControlState();
   setStatus('Loading source index...');
   const bundledManifest = await window.GIGSourceLoader.loadBundledManifest();
   const bundledEntries = bundledManifest.entries;
@@ -45,6 +46,8 @@ async function init() {
 
   try {
     await ensureBridge();
+    const pending = await getPendingContextInspect();
+    if (pending) selectLastRightClickedComponent();
   } catch (_error) {
     state.bridgeInjected = false;
   }
@@ -54,8 +57,7 @@ function bindEvents() {
   els.refreshButton.addEventListener('click', () => refresh());
   els.searchInput.addEventListener('input', () => applyTreeFilters());
   els.customOnlyToggle.addEventListener('change', () => {
-    els.showAppToggle.disabled = els.customOnlyToggle.checked;
-    els.showLibraryToggle.disabled = els.customOnlyToggle.checked;
+    syncFilterControlState();
     applyTreeFilters();
   });
   els.showAppToggle.addEventListener('change', () => applyTreeFilters());
@@ -64,13 +66,30 @@ function bindEvents() {
   els.detailsContent.addEventListener('click', handleDetailsClick);
   chrome.runtime?.onMessage?.addListener(message => {
     if (message?.type === 'gig-context-inspect' && message.tabId === chrome.devtools.inspectedWindow.tabId) {
-      selectLastRightClickedComponent();
+      getPendingContextInspect().finally(() => selectLastRightClickedComponent());
     }
   });
 
   for (const tab of els.tabs) {
     tab.addEventListener('click', () => activateTab(tab.dataset.tab));
   }
+}
+
+function syncFilterControlState() {
+  els.showAppToggle.disabled = els.customOnlyToggle.checked;
+  els.showLibraryToggle.disabled = els.customOnlyToggle.checked;
+}
+
+function getPendingContextInspect() {
+  return new Promise(resolve => {
+    chrome.runtime?.sendMessage?.(
+      {
+        type: 'gig-panel-ready',
+        tabId: chrome.devtools.inspectedWindow.tabId,
+      },
+      response => resolve(Boolean(response?.hasPendingContextInspect))
+    );
+  });
 }
 
 async function handleIndexFileSelected(event) {
@@ -185,11 +204,27 @@ function renderTreeList(nodes) {
 
     const badges = document.createElement('span');
     badges.className = 'badges';
-    badges.appendChild(createBadge(owner === 'created' ? 'created' : owner === 'framework' ? 'GNG' : node.kind, owner));
+    badges.appendChild(createBadge(owner === 'created' ? 'App' : owner === 'framework' ? 'GNG' : node.kind, owner));
     if (source.componentTs) badges.appendChild(createBadge('ts', 'debug'));
     if (node.hasAngularDebugApi) badges.appendChild(createBadge('debug', 'debug'));
 
-    row.append(arrow, label, badges);
+    const actions = document.createElement('span');
+    actions.className = 'tree-actions';
+    if (source.componentTs) {
+      const openFileButton = document.createElement('button');
+      openFileButton.className = 'icon-button tree-action-button';
+      openFileButton.type = 'button';
+      openFileButton.title = 'Open component in VS Code';
+      openFileButton.setAttribute('aria-label', 'Open component in VS Code');
+      openFileButton.innerHTML = iconSvg('code');
+      openFileButton.addEventListener('click', event => {
+        event.stopPropagation();
+        openVsCodePath(resolveProjectPath(source.componentTs));
+      });
+      actions.appendChild(openFileButton);
+    }
+
+    row.append(arrow, label, actions, badges);
     row.addEventListener('click', event => {
       event.stopPropagation();
       selectNode(node.id);
@@ -214,11 +249,25 @@ function createBadge(text, className = '') {
   return badge;
 }
 
-function selectNode(id) {
+function selectNode(id, options = {}) {
   state.selectedId = id;
   document.querySelectorAll('.tree-node.selected').forEach(node => node.classList.remove('selected'));
-  document.querySelector(`.tree-node[data-id="${cssEscape(id)}"]`)?.classList.add('selected');
+  const row = document.querySelector(`.tree-node[data-id="${cssEscape(id)}"]`);
+  row?.classList.add('selected');
+  if (options.reveal) revealTreeNode(row);
   renderDetails(state.flatById.get(id));
+}
+
+function revealTreeNode(row) {
+  if (!row) return;
+  let current = row.closest('.tree-item');
+  while (current) {
+    current.classList.remove('hidden-by-filter');
+    const parentList = current.parentElement?.closest('.tree-item');
+    current = parentList;
+  }
+  row.classList.remove('hidden-by-filter');
+  row.scrollIntoView({ block: 'center', inline: 'nearest' });
 }
 
 async function inspectNode(id) {
@@ -249,10 +298,20 @@ function renderDetails(node) {
   els.detailsTitle.textContent = node.selector;
   els.detailsSubtitle.textContent = sourceInfo.componentTs || sourceInfo.routeHint || node.elementPath;
   els.detailsBadges.innerHTML = '';
-  els.detailsBadges.appendChild(createBadge(owner === 'created' ? 'created/app' : owner === 'framework' ? 'GNG/framework' : node.kind, owner));
+  els.detailsBadges.appendChild(createBadge(owner === 'created' ? 'App' : owner === 'framework' ? 'GNG/framework' : node.kind, owner));
   if (sourceInfo.className || node.componentClassName) els.detailsBadges.appendChild(createBadge(sourceInfo.className || node.componentClassName));
   if (sourceInfo.componentTs) els.detailsBadges.appendChild(createBadge('indexed', 'debug'));
   if (node.hasAngularDebugApi) els.detailsBadges.appendChild(createBadge('Angular debug', 'debug'));
+  if (sourceInfo.componentTs) {
+    const openFileButton = document.createElement('button');
+    openFileButton.className = 'icon-button';
+    openFileButton.type = 'button';
+    openFileButton.title = 'Open component in VS Code';
+    openFileButton.setAttribute('aria-label', 'Open component in VS Code');
+    openFileButton.dataset.openVscode = resolveProjectPath(sourceInfo.componentTs);
+    openFileButton.innerHTML = iconSvg('code');
+    els.detailsBadges.appendChild(openFileButton);
+  }
 
   document.getElementById('tab-overview').innerHTML = renderOverview(node, source);
   document.getElementById('tab-attributes').innerHTML = renderObjectTable(node.attributes, 'No host attributes.');
@@ -276,7 +335,7 @@ function renderOverview(node, sourceResult) {
   return `
     <table class="kv">
       ${row('Selector', node.selector)}
-      ${row('Owner', owner === 'created' ? 'Created/app component' : owner === 'framework' ? 'GNG/GIG/GSM framework component' : 'Unknown')}
+      ${row('Owner', owner === 'created' ? 'App component' : owner === 'framework' ? 'GNG/GIG/GSM framework component' : 'Unknown')}
       ${row('Runtime kind', node.kind)}
       ${row('Source class', source.className || 'Not indexed')}
       ${row('Runtime class', node.componentClassName || 'Not available')}
@@ -398,7 +457,7 @@ function pathRow(key, value) {
 
 function copyButton(value) {
   if (!value) return '';
-  return `<button class="icon-button copy-button" type="button" data-copy-value="${escapeHtml(value)}" title="Copy value">Copy</button>`;
+  return iconButton('copy', 'Copy value', `data-copy-value="${escapeHtml(value)}"`);
 }
 
 function pathActionButtons(path) {
@@ -407,9 +466,26 @@ function pathActionButtons(path) {
   if (!filePath) return '';
   const folderPath = getDirectoryPath(filePath);
   return `
-    <button class="icon-button" type="button" data-open-folder="${escapeHtml(folderPath)}" title="Open directory">Folder</button>
-    <button class="icon-button" type="button" data-open-vscode="${escapeHtml(filePath)}" title="Open in VS Code">VS Code</button>
+    ${iconButton('folder', 'Open directory in VS Code', `data-open-folder="${escapeHtml(folderPath)}"`)}
+    ${iconButton('code', 'Open file in VS Code', `data-open-vscode="${escapeHtml(filePath)}"`)}
   `;
+}
+
+function iconButton(name, title, attrs) {
+  return `
+    <button class="icon-button" type="button" ${attrs} title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+      ${iconSvg(name)}
+    </button>
+  `;
+}
+
+function iconSvg(name) {
+  const icons = {
+    copy: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="6" y="5" width="7" height="8" rx="1.2"></rect><path d="M3 10.5V3.8C3 3.4 3.4 3 3.8 3h6.7"></path></svg>',
+    folder: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5h4l1.2 1.5h5.8v5.2c0 .7-.4 1.1-1.1 1.1H3.6c-.7 0-1.1-.4-1.1-1.1V5.5Z"></path><path d="M2.5 5.5V4.2c0-.7.4-1.1 1.1-1.1h2.5l1.1 1.2h5.2c.7 0 1.1.4 1.1 1.1V7"></path></svg>',
+    code: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6.3 4-3.5 4 3.5 4"></path><path d="m9.7 4 3.5 4-3.5 4"></path></svg>',
+  };
+  return icons[name] || icons.copy;
 }
 
 async function handleDetailsClick(event) {
@@ -423,13 +499,13 @@ async function handleDetailsClick(event) {
   }
 
   if (target.dataset.openFolder) {
-    openExternalUrl(pathToFileUrl(target.dataset.openFolder));
-    setStatus('Opened component directory.');
+    openVsCodePath(target.dataset.openFolder);
+    setStatus('Opening component directory in VS Code.');
     return;
   }
 
   if (target.dataset.openVscode) {
-    openExternalUrl(`vscode://file/${target.dataset.openVscode.replace(/\\/g, '/')}`);
+    openVsCodePath(target.dataset.openVscode);
     setStatus('Opening file in VS Code.');
   }
 }
@@ -458,6 +534,10 @@ function openExternalUrl(url) {
   window.open(url, '_blank', 'noopener');
 }
 
+function openVsCodePath(path) {
+  openExternalUrl(pathToVsCodeUrl(path));
+}
+
 async function selectLastRightClickedComponent() {
   try {
     await ensureBridge();
@@ -473,7 +553,7 @@ async function selectLastRightClickedComponent() {
     }
 
     if (!result?.ok) throw new Error(result?.message || 'Could not find a component for the right-clicked element.');
-    selectNode(result.id);
+    selectNode(result.id, { reveal: true });
     activateTab('overview');
     setStatus(`Opened ${result.selector} from page right-click.`);
   } catch (error) {
@@ -493,14 +573,13 @@ function getDirectoryPath(path) {
   return normalizePath(path).split('/').slice(0, -1).join('/');
 }
 
-function pathToFileUrl(path) {
+function pathToVsCodeUrl(path) {
   const normalized = normalizePath(path);
-  const prefix = /^[a-zA-Z]:\//.test(normalized) ? 'file:///' : 'file://';
   const parts = normalized.split('/').map((part, index) => {
     if (index === 0 && /^[a-zA-Z]:$/.test(part)) return part;
     return encodeURIComponent(part);
   });
-  return `${prefix}${parts.join('/')}`;
+  return `vscode://file/${parts.join('/')}`;
 }
 
 function normalizePath(path) {
@@ -559,7 +638,7 @@ function applyTreeFilters() {
     item.classList.toggle('hidden-by-filter', !ownRowVisible && !childVisible);
   });
 
-  const mode = customOnly ? 'created' : 'visible';
+  const mode = customOnly ? 'app' : 'visible';
   els.componentCount.textContent = `${visibleCount}/${state.scan?.count || 0} ${mode}`;
 }
 

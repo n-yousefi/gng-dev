@@ -200,6 +200,17 @@ input {
   justify-content: flex-end;
 }
 
+.tree-actions {
+  display: inline-flex;
+  gap: 3px;
+  opacity: 0;
+}
+
+.tree-node:hover .tree-actions,
+.tree-node.selected .tree-actions {
+  opacity: 1;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -255,11 +266,23 @@ input {
 
 .details-header {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   padding: 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+}
+
+.details-header > div:first-child {
+  min-width: 0;
+}
+
+.details-title-row {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .details-header h1 {
@@ -272,6 +295,17 @@ input {
   margin: 4px 0 0;
   color: var(--muted);
   word-break: break-all;
+}
+
+.details-title-row > .badges {
+  justify-content: flex-start;
+  margin-top: 1px;
+}
+
+.details-title-row .badge {
+  min-height: 16px;
+  padding: 0 5px;
+  font-size: 11px;
 }
 
 .tabs {
@@ -337,6 +371,11 @@ input {
   white-space: pre-wrap;
 }
 
+.cell-value + .icon-button {
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 .row-actions {
   display: inline-flex;
   gap: 4px;
@@ -345,14 +384,16 @@ input {
 }
 
 .icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
   min-height: 20px;
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   background: #fff;
   color: var(--muted);
-  padding: 1px 5px;
-  font-size: 11px;
-  line-height: 16px;
+  padding: 0;
   cursor: pointer;
 }
 
@@ -362,8 +403,19 @@ input {
   background: var(--accent-soft);
 }
 
-.copy-button {
-  margin-left: 6px;
+.icon-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tree-action-button {
+  width: 20px;
+  height: 20px;
 }
 
 .section-title {
