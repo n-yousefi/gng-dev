@@ -13,8 +13,13 @@
       <div class="segmented-filter" role="group" aria-label="Component owner filter">
         <button class="filter-button" type="button" data-filter="all">All</button>
         <button class="filter-button active" type="button" data-filter="app">APP</button>
+        <button class="filter-button" type="button" data-filter="indexed-app">Indexed APP</button>
         <button class="filter-button" type="button" data-filter="gng">GNG</button>
       </div>
+      <label class="toggle" title="Outline selected or hovered components on the inspected page.">
+        <input id="highlightToggle" type="checkbox" />
+        <span>Highlight on page</span>
+      </label>
       <label class="file-picker">
         <span>Load index</span>
         <input id="indexFileInput" type="file" accept=".json,application/json" />
@@ -26,7 +31,15 @@
       <aside class="tree-pane">
         <div class="pane-title">
           <span>Components</span>
-          <span id="componentCount" class="muted">0</span>
+          <span class="pane-title-actions">
+            <span id="changeSummary" class="change-summary hidden"></span>
+            <button id="clearFocusButton" class="clear-focus-button hidden" type="button" title="Show full component tree">Clear focus</button>
+            <span id="componentCount" class="muted">0</span>
+          </span>
+        </div>
+        <div id="pinnedPane" class="pinned-pane hidden">
+          <div class="pinned-title">Pinned</div>
+          <div id="pinnedList" class="pinned-list"></div>
         </div>
         <div id="treeRoot" class="tree-root empty">Click Refresh to scan the inspected page.</div>
       </aside>
@@ -43,6 +56,7 @@
                 <h1 id="detailsTitle"></h1>
                 <div id="detailsBadges" class="badges"></div>
               </div>
+              <div id="detailsBreadcrumb" class="breadcrumb"></div>
               <p id="detailsSubtitle"></p>
             </div>
           </div>
@@ -52,6 +66,8 @@
             <button class="tab" type="button" data-tab="attributes">Attributes</button>
             <button class="tab" type="button" data-tab="component">Component</button>
             <button class="tab" type="button" data-tab="template">Template</button>
+            <button class="tab" type="button" data-tab="changes">Changes</button>
+            <button class="tab" type="button" data-tab="problems">Problems</button>
             <button class="tab" type="button" data-tab="dom">DOM</button>
           </nav>
 
@@ -59,6 +75,8 @@
           <section id="tab-attributes" class="tab-panel"></section>
           <section id="tab-component" class="tab-panel"></section>
           <section id="tab-template" class="tab-panel"></section>
+          <section id="tab-changes" class="tab-panel"></section>
+          <section id="tab-problems" class="tab-panel"></section>
           <section id="tab-dom" class="tab-panel"></section>
         </div>
       </section>

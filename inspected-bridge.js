@@ -2,6 +2,7 @@
   const GLOBAL_KEY = '__gigComponentInspector';
   const VERSION = 1;
   const DEFAULT_PREFIXES = ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
+  const HIGHLIGHT_ID = '__gigComponentInspectorHighlight';
 
   function safeString(value, maxLength = 300) {
     if (value == null) return '';
@@ -60,7 +61,8 @@
       hasAngularDebugApi: Boolean(window.ng),
       componentClassName: null,
       directiveNames: [],
-      inputs: {},
+      inputs: [],
+      outputs: [],
       componentInstanceSummary: {},
       componentProperties: {},
     };
@@ -69,6 +71,9 @@
       const component = window.ng?.getComponent?.(element) || window.ng?.getOwningComponent?.(element);
       if (component) {
         metadata.componentClassName = component.constructor?.name || null;
+        const ioMetadata = getComponentIoMetadata(component);
+        metadata.inputs = ioMetadata.inputs;
+        metadata.outputs = ioMetadata.outputs;
         metadata.componentInstanceSummary = summarizeInstance(component);
         metadata.componentProperties = summarizeProperties(component);
       }
@@ -89,6 +94,34 @@
     }
 
     return metadata;
+  }
+
+  function getComponentIoMetadata(component) {
+    const definition = component?.constructor?.ɵcmp;
+    return {
+      inputs: normalizeIoDefinition(definition?.inputs),
+      outputs: normalizeIoDefinition(definition?.outputs),
+    };
+  }
+
+  function normalizeIoDefinition(definition) {
+    if (!definition || typeof definition !== 'object') return [];
+    return Object.entries(definition)
+      .map(([publicName, value]) => {
+        if (Array.isArray(value)) {
+          return {
+            publicName,
+            propertyName: value[0] || publicName,
+            declaredName: value[1] || '',
+          };
+        }
+        return {
+          publicName,
+          propertyName: typeof value === 'string' ? value : publicName,
+          declaredName: '',
+        };
+      })
+      .sort((a, b) => a.publicName.localeCompare(b.publicName));
   }
 
   function summarizeProperties(instance) {
@@ -190,6 +223,8 @@
       classes: Array.from(element.classList || []),
       componentClassName: className,
       directiveNames: angular.directiveNames,
+      inputs: angular.inputs,
+      outputs: angular.outputs,
       hasAngularDebugApi: angular.hasAngularDebugApi,
       componentInstanceSummary: angular.componentInstanceSummary,
       componentProperties: angular.componentProperties,
@@ -268,6 +303,59 @@
     return { ok: true };
   }
 
+  function getHighlightElement() {
+    let overlay = document.getElementById(HIGHLIGHT_ID);
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = HIGHLIGHT_ID;
+      overlay.style.position = 'fixed';
+      overlay.style.zIndex = '2147483647';
+      overlay.style.pointerEvents = 'none';
+      overlay.style.border = '1px solid rgba(44, 136, 255, 0.95)';
+      overlay.style.background = 'rgba(65, 141, 255, 0.22)';
+      overlay.style.boxShadow = 'inset 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 0 1px rgba(44, 136, 255, 0.45)';
+      overlay.style.borderRadius = '2px';
+      overlay.style.display = 'none';
+      document.documentElement.appendChild(overlay);
+    }
+    return overlay;
+  }
+
+  function setHighlightEnabled(enabled) {
+    window[GLOBAL_KEY].highlightEnabled = Boolean(enabled);
+    if (!enabled) clearHighlight();
+    return { ok: true, enabled: window[GLOBAL_KEY].highlightEnabled };
+  }
+
+  function highlightElementById(id, options = {}) {
+    if (!window[GLOBAL_KEY].highlightEnabled) return { ok: true, skipped: true };
+    const element = window[GLOBAL_KEY].elements?.get(id);
+    if (!element || !document.documentElement.contains(element)) {
+      return { ok: false, message: 'Element no longer exists. Refresh the component tree.' };
+    }
+    const rect = element.getBoundingClientRect();
+    const overlay = getHighlightElement();
+    overlay.style.left = `${Math.max(0, rect.left)}px`;
+    overlay.style.top = `${Math.max(0, rect.top)}px`;
+    overlay.style.width = `${Math.max(0, rect.width)}px`;
+    overlay.style.height = `${Math.max(0, rect.height)}px`;
+    overlay.style.display = rect.width && rect.height ? 'block' : 'none';
+    clearTimeout(window[GLOBAL_KEY].highlightTimer);
+    window[GLOBAL_KEY].highlightTimer = null;
+    if (options.durationMs !== 0) {
+      window[GLOBAL_KEY].highlightTimer = setTimeout(clearHighlight, options.durationMs || 1400);
+    }
+    return { ok: true };
+  }
+
+  function clearHighlight() {
+    const overlay = document.getElementById(HIGHLIGHT_ID);
+    if (overlay) overlay.style.display = 'none';
+    clearTimeout(window[GLOBAL_KEY].highlightTimer);
+    window[GLOBAL_KEY].highlightTimer = null;
+    return { ok: true };
+  }
+
   function rememberContextElement(event) {
     window[GLOBAL_KEY].lastContextElement = event.target instanceof Element ? event.target : null;
   }
@@ -321,9 +409,14 @@
     version: VERSION,
     elements: new Map(),
     lastContextElement: null,
+    highlightEnabled: false,
+    highlightTimer: null,
     scan,
     inspectElementById,
     selectLastContextComponent,
+    setHighlightEnabled,
+    highlightElementById,
+    clearHighlight,
   };
 
   document.removeEventListener('contextmenu', rememberContextElement, true);

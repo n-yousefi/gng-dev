@@ -2,13 +2,19 @@ const els = {
   refreshButton: document.getElementById('refreshButton'),
   searchInput: document.getElementById('searchInput'),
   filterButtons: Array.from(document.querySelectorAll('.filter-button')),
+  highlightToggle: document.getElementById('highlightToggle'),
   indexFileInput: document.getElementById('indexFileInput'),
   statusText: document.getElementById('statusText'),
   componentCount: document.getElementById('componentCount'),
+  changeSummary: document.getElementById('changeSummary'),
+  clearFocusButton: document.getElementById('clearFocusButton'),
+  pinnedPane: document.getElementById('pinnedPane'),
+  pinnedList: document.getElementById('pinnedList'),
   treeRoot: document.getElementById('treeRoot'),
   emptyDetails: document.getElementById('emptyDetails'),
   detailsContent: document.getElementById('detailsContent'),
   detailsTitle: document.getElementById('detailsTitle'),
+  detailsBreadcrumb: document.getElementById('detailsBreadcrumb'),
   detailsSubtitle: document.getElementById('detailsSubtitle'),
   detailsBadges: document.getElementById('detailsBadges'),
   tabs: Array.from(document.querySelectorAll('.tab')),
@@ -24,6 +30,13 @@ const state = {
   loadedIndexCount: 0,
   projectRoot: '',
   ownerFilter: 'app',
+  collapsedIds: new Set(),
+  focusRootId: null,
+  parentById: new Map(),
+  pins: new Map(),
+  scanDiff: null,
+  problems: [],
+  highlightEnabled: true,
 };
 
 init();
@@ -52,13 +65,17 @@ async function init() {
 }
 
 function bindEvents() {
+  els.highlightToggle.checked = state.highlightEnabled;
   els.refreshButton.addEventListener('click', () => refresh());
-  els.searchInput.addEventListener('input', () => applyTreeFilters());
+  els.searchInput.addEventListener('input', () => handleSearchChanged());
+  els.clearFocusButton.addEventListener('click', () => clearTreeFocus());
+  els.highlightToggle.addEventListener('change', () => setPageHighlightEnabled(els.highlightToggle.checked));
   for (const button of els.filterButtons) {
     button.addEventListener('click', () => {
       state.ownerFilter = button.dataset.filter || 'all';
       syncFilterButtons();
       applyTreeFilters();
+      if (state.ownerFilter === 'all' && state.selectedId) selectNode(state.selectedId, { reveal: true, keepHighlight: true });
     });
   }
   els.indexFileInput.addEventListener('change', handleIndexFileSelected);
@@ -71,6 +88,16 @@ function bindEvents() {
 
   for (const tab of els.tabs) {
     tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+  }
+}
+
+function handleSearchChanged() {
+  if (state.scan) {
+    const selectedId = state.selectedId;
+    renderTree(state.scan.tree);
+    if (selectedId) selectNode(selectedId, { reveal: false, keepHighlight: true });
+  } else {
+    applyTreeFilters();
   }
 }
 
@@ -92,6 +119,104 @@ function getPendingContextInspect() {
   });
 }
 
+async function setPageHighlightEnabled(enabled) {
+  state.highlightEnabled = Boolean(enabled);
+  try {
+    await ensureBridge();
+    await evalInInspectedPage(`window.__gigComponentInspector.setHighlightEnabled(${JSON.stringify(state.highlightEnabled)})`);
+    if (state.highlightEnabled && state.selectedId) {
+      highlightNodeOnPage(state.selectedId);
+    }
+  } catch (error) {
+    setStatus(error.message || String(error), true);
+  }
+}
+
+async function highlightNodeOnPage(id, options = {}) {
+  if (!state.highlightEnabled || !id) return;
+  try {
+    await ensureBridge();
+    const result = await evalInInspectedPage(
+      `window.__gigComponentInspector.highlightElementById(${JSON.stringify(id)}, ${JSON.stringify(options)})`
+    );
+    if (!result?.ok) throw new Error(result?.message || 'Could not highlight element.');
+  } catch (error) {
+    setStatus(error.message || String(error), true);
+  }
+}
+
+async function clearPageHighlight() {
+  try {
+    await ensureBridge();
+    await evalInInspectedPage('window.__gigComponentInspector.clearHighlight()');
+  } catch (_error) {
+    // Losing the inspected-page overlay is non-critical while the user is moving through the tree.
+  }
+}
+
+function buildParentMap(nodes, parentId = null, map = new Map()) {
+  for (const node of nodes || []) {
+    map.set(node.id, parentId);
+    buildParentMap(node.children || [], node.id, map);
+  }
+  return map;
+}
+
+function getNodeSource(node) {
+  return window.GIGSourceLoader.findSource(node, state.sourceIndex).source || {};
+}
+
+function getNodeKey(node) {
+  if (!node) return '';
+  const source = getNodeSource(node);
+  return [node.selector, source.componentTs || source.templateUrl || node.elementPath].join('|');
+}
+
+function computeScanDiff(previousScan, currentScan) {
+  if (!previousScan?.flatNodes?.length) return null;
+  const previousByKey = new Map(previousScan.flatNodes.map(node => [getNodeKey(node), node]));
+  const currentByKey = new Map(currentScan.flatNodes.map(node => [getNodeKey(node), node]));
+  const added = [];
+  const removed = [];
+
+  for (const [key, node] of currentByKey) {
+    if (!previousByKey.has(key)) added.push(node);
+  }
+  for (const [key, node] of previousByKey) {
+    if (!currentByKey.has(key)) removed.push(node);
+  }
+
+  return { added, removed };
+}
+
+function computeProblems(scan, previousSelectedKey) {
+  const problems = [];
+  if (!scan?.angularDebugApi) {
+    problems.push({ severity: 'warning', title: 'Angular debug API unavailable', detail: 'Runtime component instance metadata may be limited.' });
+  }
+
+  const selectorCounts = new Map();
+  for (const node of scan?.flatNodes || []) {
+    selectorCounts.set(node.selector, (selectorCounts.get(node.selector) || 0) + 1);
+    const sourceResult = window.GIGSourceLoader.findSource(node, state.sourceIndex);
+    const source = sourceResult.source || {};
+    const owner = getNodeOwner(node, sourceResult);
+    if (!sourceResult.found) problems.push({ severity: 'info', title: 'Missing source index', detail: node.selector });
+    if (sourceResult.found && !source.templateUrl) problems.push({ severity: 'warning', title: 'Missing template path', detail: node.selector });
+    if (owner === 'unknown') problems.push({ severity: 'info', title: 'Unknown owner', detail: node.selector });
+  }
+
+  for (const [selector, count] of selectorCounts) {
+    if (count > 1) problems.push({ severity: 'info', title: 'Duplicate selector', detail: `${selector} appears ${count} times.` });
+  }
+
+  if (previousSelectedKey && !Array.from(state.flatById.values()).some(node => getNodeKey(node) === previousSelectedKey)) {
+    problems.push({ severity: 'warning', title: 'Selected component changed', detail: 'The previously selected component is no longer present after refresh.' });
+  }
+
+  return problems;
+}
+
 async function handleIndexFileSelected(event) {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -103,7 +228,13 @@ async function handleIndexFileSelected(event) {
     state.loadedIndexCount = entries.length;
     state.projectRoot = Array.isArray(json) ? '' : normalizePath(json.projectRoot || '');
     setStatus(`Loaded ${entries.length} indexed components from ${file.name}.`);
-    applyTreeFilters();
+    if (state.scan) {
+      state.problems = computeProblems(state.scan, '');
+      renderTree(state.scan.tree);
+      renderPins();
+    } else {
+      applyTreeFilters();
+    }
     if (state.selectedId) renderDetails(state.flatById.get(state.selectedId));
   } catch (error) {
     setStatus(`Could not load index: ${error.message}`, true);
@@ -123,10 +254,18 @@ async function refresh() {
     if (!result?.ok) {
       throw new Error(result?.message || 'Scan failed.');
     }
+    const previousScan = state.scan;
+    const previousSelectedKey = state.selectedId ? getNodeKey(state.flatById.get(state.selectedId)) : '';
     state.scan = result;
     state.flatById = new Map(result.flatNodes.map(node => [node.id, node]));
+    state.parentById = buildParentMap(result.tree);
+    state.scanDiff = computeScanDiff(previousScan, result);
+    state.problems = computeProblems(result, previousSelectedKey);
     state.selectedId = null;
+    state.collapsedIds.clear();
+    state.focusRootId = null;
     renderTree(result.tree);
+    renderPins();
     showEmptyDetails();
     setStatus(`Found ${result.count} components${result.angularDebugApi ? ' with Angular debug API.' : '.'}`);
   } catch (error) {
@@ -144,6 +283,9 @@ async function ensureBridge() {
   const bridgeCode = await fetch(bridgeUrl).then(response => response.text());
   await evalInInspectedPage(bridgeCode);
   state.bridgeInjected = true;
+  if (state.highlightEnabled) {
+    await evalInInspectedPage('window.__gigComponentInspector.setHighlightEnabled(true)');
+  }
 }
 
 function evalInInspectedPage(expression) {
@@ -159,8 +301,11 @@ function evalInInspectedPage(expression) {
 }
 
 function renderTree(tree) {
-  els.componentCount.textContent = String(state.scan?.count || 0);
-  if (!tree?.length) {
+  const displayTree = getDisplayTree(tree);
+  els.clearFocusButton.classList.toggle('hidden', !state.focusRootId);
+  renderChangeSummary();
+  els.componentCount.textContent = String(countTreeNodes(displayTree));
+  if (!displayTree?.length) {
     els.treeRoot.className = 'tree-root empty';
     els.treeRoot.textContent = 'No matching component hosts found on this page.';
     return;
@@ -168,8 +313,26 @@ function renderTree(tree) {
 
   els.treeRoot.className = 'tree-root';
   els.treeRoot.innerHTML = '';
-  els.treeRoot.appendChild(renderTreeList(tree));
+  els.treeRoot.appendChild(renderTreeList(displayTree));
   applyTreeFilters();
+}
+
+function renderChangeSummary() {
+  const added = state.scanDiff?.added?.length || 0;
+  const removed = state.scanDiff?.removed?.length || 0;
+  els.changeSummary.classList.toggle('hidden', !state.scanDiff);
+  els.changeSummary.classList.toggle('has-changes', Boolean(added || removed));
+  els.changeSummary.textContent = state.scanDiff ? `+${added} -${removed}` : '';
+}
+
+function getDisplayTree(tree) {
+  if (!state.focusRootId) return tree || [];
+  const focused = state.flatById.get(state.focusRootId);
+  return focused ? [focused] : tree || [];
+}
+
+function countTreeNodes(nodes) {
+  return (nodes || []).reduce((count, node) => count + 1 + countTreeNodes(node.children), 0);
 }
 
 function renderTreeList(nodes) {
@@ -183,6 +346,7 @@ function renderTreeList(nodes) {
     const item = document.createElement('li');
     item.className = 'tree-item';
     item.dataset.id = node.id;
+    item.classList.toggle('collapsed', state.collapsedIds.has(node.id));
 
     const row = document.createElement('div');
     row.className = 'tree-node';
@@ -190,16 +354,23 @@ function renderTreeList(nodes) {
     row.dataset.kind = node.kind;
     row.dataset.owner = owner;
 
-    const arrow = document.createElement('span');
+    const arrow = document.createElement('button');
     arrow.className = 'tree-arrow';
-    arrow.textContent = node.children?.length ? 'v' : '';
+    arrow.type = 'button';
+    arrow.title = node.children?.length ? 'Collapse or expand children' : '';
+    arrow.disabled = !node.children?.length;
+    arrow.innerHTML = node.children?.length ? iconSvg('chevron') : '';
+    arrow.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleTreeNode(node.id);
+    });
 
     const label = document.createElement('span');
     label.className = 'tree-label';
-    const secondary = source.componentTs || source.routeHint || node.componentClassName || source.className || '';
+    const secondary = node.componentClassName || source.className || '';
     label.innerHTML = `
-      <span class="selector">${escapeHtml(node.selector)}</span>
-      ${secondary ? `<span class="secondary">${escapeHtml(secondary)}</span>` : ''}
+      <span class="selector">${highlightText(node.selector)}</span>
+      ${secondary ? `<span class="secondary">${highlightText(secondary)}</span>` : ''}
     `;
 
     const badges = document.createElement('span');
@@ -222,6 +393,42 @@ function renderTreeList(nodes) {
       });
       actions.appendChild(openFileButton);
     }
+    const copyPathButton = document.createElement('button');
+    copyPathButton.className = 'icon-button icon-button-path tree-action-button';
+    copyPathButton.type = 'button';
+    copyPathButton.title = 'Copy component path';
+    copyPathButton.setAttribute('aria-label', 'Copy component path');
+    copyPathButton.innerHTML = iconSvg('path');
+    copyPathButton.addEventListener('click', event => {
+      event.stopPropagation();
+      copyText(getComponentPath(node.id));
+      setStatus('Copied component path.');
+    });
+    actions.appendChild(copyPathButton);
+
+    const pinButton = document.createElement('button');
+    pinButton.className = 'icon-button icon-button-pin tree-action-button';
+    pinButton.type = 'button';
+    pinButton.title = 'Pin component';
+    pinButton.setAttribute('aria-label', 'Pin component');
+    pinButton.innerHTML = iconSvg(isPinned(node) ? 'pinFilled' : 'pin');
+    pinButton.addEventListener('click', event => {
+      event.stopPropagation();
+      togglePin(node.id);
+    });
+    actions.appendChild(pinButton);
+
+    const focusButton = document.createElement('button');
+    focusButton.className = 'icon-button icon-button-focus tree-action-button';
+    focusButton.type = 'button';
+    focusButton.title = 'Focus this component and children';
+    focusButton.setAttribute('aria-label', 'Focus this component and children');
+    focusButton.innerHTML = iconSvg('focus');
+    focusButton.addEventListener('click', event => {
+      event.stopPropagation();
+      focusTreeOn(node.id);
+    });
+    actions.appendChild(focusButton);
 
     row.append(arrow, label, actions, badges);
     row.addEventListener('click', event => {
@@ -232,6 +439,8 @@ function renderTreeList(nodes) {
       event.stopPropagation();
       inspectNode(node.id);
     });
+    row.addEventListener('mouseenter', () => highlightNodeOnPage(node.id, { durationMs: 0 }));
+    row.addEventListener('mouseleave', () => clearPageHighlight());
 
     item.appendChild(row);
     if (node.children?.length) item.appendChild(renderTreeList(node.children));
@@ -239,6 +448,100 @@ function renderTreeList(nodes) {
   }
 
   return list;
+}
+
+function toggleTreeNode(id) {
+  if (state.collapsedIds.has(id)) {
+    state.collapsedIds.delete(id);
+  } else {
+    state.collapsedIds.add(id);
+  }
+  const item = document.querySelector(`.tree-item[data-id="${cssEscape(id)}"]`);
+  item?.classList.toggle('collapsed', state.collapsedIds.has(id));
+}
+
+function focusTreeOn(id) {
+  state.focusRootId = id;
+  state.collapsedIds.delete(id);
+  renderTree(state.scan?.tree || []);
+  selectNode(id, { reveal: true });
+  setStatus('Focused component subtree.');
+}
+
+function clearTreeFocus() {
+  const previousSelection = state.selectedId;
+  state.focusRootId = null;
+  renderTree(state.scan?.tree || []);
+  if (previousSelection) selectNode(previousSelection, { reveal: true });
+  setStatus('Showing full component tree.');
+}
+
+function getComponentAncestors(id) {
+  const nodes = [];
+  let currentId = id;
+  while (currentId) {
+    const node = state.flatById.get(currentId);
+    if (!node) break;
+    nodes.unshift(node);
+    currentId = state.parentById.get(currentId);
+  }
+  return nodes;
+}
+
+function getComponentPath(id) {
+  return getComponentAncestors(id).map(node => node.selector).join(' > ');
+}
+
+function isPinned(node) {
+  return state.pins.has(getNodeKey(node));
+}
+
+function togglePin(id) {
+  const node = state.flatById.get(id);
+  if (!node) return;
+  const key = getNodeKey(node);
+  if (state.pins.has(key)) {
+    state.pins.delete(key);
+    setStatus('Unpinned component.');
+  } else {
+    const source = getNodeSource(node);
+    state.pins.set(key, {
+      key,
+      selector: node.selector,
+      label: node.componentClassName || source.className || node.selector,
+      sourcePath: source.componentTs || source.templateUrl || '',
+    });
+    setStatus('Pinned component.');
+  }
+  renderPins();
+  renderTree(state.scan?.tree || []);
+  if (state.selectedId) selectNode(state.selectedId, { reveal: false, keepHighlight: true });
+}
+
+function renderPins() {
+  const pins = Array.from(state.pins.values());
+  els.pinnedPane.classList.toggle('hidden', !pins.length);
+  els.pinnedList.innerHTML = '';
+  for (const pin of pins) {
+    const button = document.createElement('button');
+    button.className = 'pinned-chip';
+    button.type = 'button';
+    button.title = pin.sourcePath || pin.selector;
+    button.innerHTML = `${iconSvg('pinFilled')}<span>${escapeHtml(pin.selector)}</span>`;
+    button.addEventListener('click', () => {
+      const node = findPinnedNode(pin);
+      if (!node) {
+        setStatus('Pinned component is not present in the current scan.', true);
+        return;
+      }
+      selectNode(node.id, { reveal: true });
+    });
+    els.pinnedList.appendChild(button);
+  }
+}
+
+function findPinnedNode(pin) {
+  return Array.from(state.flatById.values()).find(node => getNodeKey(node) === pin.key);
 }
 
 function createBadge(text, className = '') {
@@ -255,6 +558,7 @@ function selectNode(id, options = {}) {
   row?.classList.add('selected');
   if (options.reveal) revealTreeNode(row);
   renderDetails(state.flatById.get(id));
+  if (!options.keepHighlight) highlightNodeOnPage(id);
 }
 
 function revealTreeNode(row) {
@@ -262,6 +566,8 @@ function revealTreeNode(row) {
   let current = row.closest('.tree-item');
   while (current) {
     current.classList.remove('hidden-by-filter');
+    current.classList.remove('collapsed');
+    if (current.dataset.id) state.collapsedIds.delete(current.dataset.id);
     const parentList = current.parentElement?.closest('.tree-item');
     current = parentList;
   }
@@ -295,6 +601,7 @@ function renderDetails(node) {
   els.emptyDetails.classList.add('hidden');
   els.detailsContent.classList.remove('hidden');
   els.detailsTitle.textContent = node.selector;
+  els.detailsBreadcrumb.innerHTML = highlightText(getComponentPath(node.id));
   els.detailsSubtitle.textContent = sourceInfo.componentTs || sourceInfo.routeHint || node.elementPath;
   els.detailsBadges.innerHTML = '';
   els.detailsBadges.appendChild(createBadge(owner === 'created' ? 'App' : owner === 'framework' ? 'GNG/framework' : node.kind, owner));
@@ -311,12 +618,34 @@ function renderDetails(node) {
     openFileButton.innerHTML = iconSvg('code');
     els.detailsBadges.appendChild(openFileButton);
   }
+  els.detailsBadges.appendChild(createHeaderActionButton('path', 'Copy component path', () => {
+    copyText(getComponentPath(node.id));
+    setStatus('Copied component path.');
+  }));
+  els.detailsBadges.appendChild(createHeaderActionButton(isPinned(node) ? 'pinFilled' : 'pin', 'Pin component', () => togglePin(node.id), 'pin'));
+  els.detailsBadges.appendChild(createHeaderActionButton('template', 'Open parent template at tag', () => openParentTemplateAtTag(node.id), 'template'));
 
   document.getElementById('tab-overview').innerHTML = renderOverview(node, source);
   document.getElementById('tab-attributes').innerHTML = renderObjectTable(node.attributes, 'No host attributes.');
   document.getElementById('tab-component').innerHTML = renderComponentInfo(node, source);
   document.getElementById('tab-template').innerHTML = renderTemplate(source);
+  document.getElementById('tab-changes').innerHTML = renderChanges();
+  document.getElementById('tab-problems').innerHTML = renderProblems();
   document.getElementById('tab-dom').innerHTML = `<pre class="code-block">${escapeHtml(node.domPreview || '')}</pre>`;
+}
+
+function createHeaderActionButton(iconName, title, onClick, className = iconName) {
+  const button = document.createElement('button');
+  button.className = `icon-button icon-button-${className}`;
+  button.type = 'button';
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.innerHTML = iconSvg(iconName);
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
 }
 
 function showEmptyDetails() {
@@ -371,6 +700,10 @@ function renderComponentInfo(node, sourceResult) {
   }, 'No source metadata found. Regenerate or load component-index.json.'));
   parts.push('<h2 class="section-title">Directives</h2>');
   parts.push(renderArray(node.directiveNames, 'No directive metadata available.'));
+  parts.push('<h2 class="section-title">Inputs</h2>');
+  parts.push(renderIoTable(node.inputs, 'No Angular input metadata available.'));
+  parts.push('<h2 class="section-title">Outputs</h2>');
+  parts.push(renderIoTable(node.outputs, 'No Angular output metadata available.'));
   parts.push('<h2 class="section-title">Safe Component Instance Summary</h2>');
   parts.push(renderObjectTable(node.componentInstanceSummary, 'No component instance summary available.'));
   parts.push('<h2 class="section-title">Component Properties</h2>');
@@ -380,6 +713,47 @@ function renderComponentInfo(node, sourceResult) {
     parts.push(renderObjectTable(node.debugErrors, 'No errors.'));
   }
   return parts.join('');
+}
+
+function renderIoTable(items, emptyText) {
+  if (!items?.length) return `<div class="notice">${escapeHtml(emptyText)}</div>`;
+  return `
+    <table class="kv">
+      ${items.map(item => row(item.publicName, item.propertyName === item.publicName ? item.publicName : `${item.propertyName}${item.declaredName ? ` (${item.declaredName})` : ''}`)).join('')}
+    </table>
+  `;
+}
+
+function renderChanges() {
+  if (!state.scanDiff) return '<div class="notice">Refresh again to compare changes with the previous scan.</div>';
+  const added = state.scanDiff.added || [];
+  const removed = state.scanDiff.removed || [];
+  if (!added.length && !removed.length) return '<div class="notice">No component changes since the previous scan.</div>';
+  return `
+    <div class="summary-list">
+      ${added.map(node => renderSummaryItem(node, 'added')).join('')}
+      ${removed.map(node => renderSummaryItem(node, 'removed')).join('')}
+    </div>
+  `;
+}
+
+function renderSummaryItem(node, type) {
+  return `
+    <div class="summary-item ${type}">
+      <strong>${type === 'added' ? 'Added' : 'Removed'}:</strong>
+      <span>${highlightText(node.selector)}</span>
+      ${node.componentClassName ? `<span class="secondary">${highlightText(node.componentClassName)}</span>` : ''}
+    </div>
+  `;
+}
+
+function renderProblems() {
+  if (!state.problems.length) return '<div class="notice">No scan problems found.</div>';
+  return `
+    <table class="kv">
+      ${state.problems.map(problem => row(problem.title, problem.detail || problem.severity)).join('')}
+    </table>
+  `;
 }
 
 function renderTemplate(sourceResult) {
@@ -425,13 +799,34 @@ function formatValue(value) {
   return JSON.stringify(value, null, 2);
 }
 
+function highlightText(value) {
+  const text = String(value ?? '');
+  const query = els.searchInput.value.trim();
+  if (!query) return escapeHtml(text);
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  let index = 0;
+  let output = '';
+  while (index < text.length) {
+    const matchIndex = lowerText.indexOf(lowerQuery, index);
+    if (matchIndex === -1) {
+      output += escapeHtml(text.slice(index));
+      break;
+    }
+    output += escapeHtml(text.slice(index, matchIndex));
+    output += `<mark class="match">${escapeHtml(text.slice(matchIndex, matchIndex + query.length))}</mark>`;
+    index = matchIndex + query.length;
+  }
+  return output;
+}
+
 function row(key, value) {
   const text = formatValue(value);
   return `
     <tr>
-      <th>${escapeHtml(key)}</th>
+      <th>${highlightText(key)}</th>
       <td>
-        <span class="cell-value">${escapeHtml(text)}</span>
+        <span class="cell-value">${highlightText(text)}</span>
         ${copyButton(text)}
       </td>
     </tr>
@@ -444,7 +839,7 @@ function pathRow(key, value) {
     <tr>
       <th>${escapeHtml(key)}</th>
       <td>
-        <span class="cell-value">${escapeHtml(text)}</span>
+        <span class="cell-value">${highlightText(text)}</span>
         <span class="row-actions">
           ${copyButton(text)}
           ${pathActionButtons(value)}
@@ -483,6 +878,12 @@ function iconSvg(name) {
     copy: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="6" y="5" width="7" height="8" rx="1.2"></rect><path d="M3 10.5V3.8C3 3.4 3.4 3 3.8 3h6.7"></path></svg>',
     folder: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5h4l1.2 1.5h5.8v5.2c0 .7-.4 1.1-1.1 1.1H3.6c-.7 0-1.1-.4-1.1-1.1V5.5Z"></path><path d="M2.5 5.5V4.2c0-.7.4-1.1 1.1-1.1h2.5l1.1 1.2h5.2c.7 0 1.1.4 1.1 1.1V7"></path></svg>',
     code: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6.3 4-3.5 4 3.5 4"></path><path d="m9.7 4 3.5 4-3.5 4"></path></svg>',
+    focus: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"></circle><path d="M2.5 6V3.5h2.5"></path><path d="M11 3.5h2.5V6"></path><path d="M13.5 10v2.5H11"></path><path d="M5 12.5H2.5V10"></path></svg>',
+    pin: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 2.7 13.3 6.2"></path><path d="m6.6 9.4-3.1 3.1"></path><path d="M5.1 8.1 8.1 3.7l4.2 4.2-4.4 3-2.8-2.8Z"></path></svg>',
+    pinFilled: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 2.7 13.3 6.2"></path><path d="m6.6 9.4-3.1 3.1"></path><path d="M5.1 8.1 8.1 3.7l4.2 4.2-4.4 3-2.8-2.8Z"></path></svg>',
+    path: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="4" r="1.5"></circle><circle cx="12" cy="12" r="1.5"></circle><path d="M5.5 4h2.8A3.7 3.7 0 0 1 12 7.7V10.5"></path></svg>',
+    template: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10v11H3z"></path><path d="M5 5h6"></path><path d="M5 8h6"></path><path d="M5 11h3"></path></svg>',
+    chevron: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"></path></svg>',
   };
   return icons[name] || icons.copy;
 }
@@ -507,6 +908,47 @@ async function handleDetailsClick(event) {
     openVsCodePath(target.dataset.openVscode);
     setStatus('Opening file in VS Code.');
   }
+}
+
+function openParentTemplateAtTag(id) {
+  const selected = state.flatById.get(id);
+  if (!selected) return;
+  let parentId = state.parentById.get(id);
+  while (parentId) {
+    const parent = state.flatById.get(parentId);
+    const sourceResult = window.GIGSourceLoader.findSource(parent, state.sourceIndex);
+    const source = sourceResult.source || {};
+    if (source.templateUrl) {
+      const path = resolveProjectPath(source.templateUrl);
+      const match = source.templateHtml ? findSelectorInTemplate(source.templateHtml, selected.selector) : null;
+      if (match) {
+        openVsCodeLocation(path, match.line, match.column);
+        setStatus(`Opening parent template at ${selected.selector}.`);
+      } else {
+        openVsCodePath(path);
+        setStatus('Opening parent template. Selector tag was not found in indexed HTML.');
+      }
+      return;
+    }
+    parentId = state.parentById.get(parentId);
+  }
+  setStatus('No indexed parent template found.', true);
+}
+
+function findSelectorInTemplate(templateHtml, selector) {
+  const pattern = new RegExp(`<\\s*${escapeRegExp(selector)}(?:\\s|>|/)`, 'i');
+  const match = pattern.exec(templateHtml);
+  if (!match) return null;
+  const before = templateHtml.slice(0, match.index);
+  const lines = before.split(/\r\n|\r|\n/);
+  return {
+    line: lines.length,
+    column: lines[lines.length - 1].length + 1,
+  };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function copyText(text) {
@@ -535,6 +977,10 @@ function openExternalUrl(url) {
 
 function openVsCodePath(path) {
   openExternalUrl(pathToVsCodeUrl(path));
+}
+
+function openVsCodeLocation(path, line, column) {
+  openExternalUrl(`${pathToVsCodeUrl(path)}:${line}:${column}`);
 }
 
 async function selectLastRightClickedComponent() {
@@ -604,6 +1050,7 @@ function applyTreeFilters() {
     const kindVisible =
       state.ownerFilter === 'all' ||
       (state.ownerFilter === 'app' && owner === 'created') ||
+      (state.ownerFilter === 'indexed-app' && owner === 'created' && Boolean(source.componentTs)) ||
       (state.ownerFilter === 'gng' && owner === 'framework');
     const haystack = [
       node.selector,
@@ -635,8 +1082,14 @@ function applyTreeFilters() {
     item.classList.toggle('hidden-by-filter', !ownRowVisible && !childVisible);
   });
 
-  const mode = state.ownerFilter === 'all' ? 'visible' : state.ownerFilter;
-  els.componentCount.textContent = `${visibleCount}/${state.scan?.count || 0} ${mode}`;
+  const totalCount = document.querySelectorAll('.tree-node').length;
+  const modeLabels = {
+    all: 'visible',
+    app: 'app',
+    'indexed-app': 'indexed app',
+    gng: 'gng',
+  };
+  els.componentCount.textContent = `${visibleCount}/${totalCount} ${modeLabels[state.ownerFilter] || 'visible'}`;
 }
 
 function getNodeOwner(node, sourceResult) {
