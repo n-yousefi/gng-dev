@@ -32,7 +32,7 @@ input {
 
 .toolbar {
   display: grid;
-  grid-template-columns: auto minmax(200px, 1fr) auto auto auto minmax(120px, auto);
+  grid-template-columns: auto minmax(200px, 1fr) auto auto minmax(120px, auto);
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -70,6 +70,38 @@ input {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+}
+
+.segmented-filter {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.filter-button {
+  min-height: 28px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.filter-button:last-child {
+  border-right: 0;
+}
+
+.filter-button:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.filter-button.active {
+  background: var(--accent);
+  color: #fff;
 }
 
 .file-picker {
@@ -389,18 +421,42 @@ input {
   width: 22px;
   height: 22px;
   min-height: 20px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid transparent;
   border-radius: 4px;
-  background: #fff;
-  color: var(--muted);
+  background: #eef2f7;
+  color: #475569;
   padding: 0;
   cursor: pointer;
 }
 
 .icon-button:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-soft);
+  filter: brightness(0.96);
+}
+
+.icon-button-copy {
+  background: #e8f0fe;
+  color: #174ea6;
+  border-color: #b8c9ef;
+}
+
+.icon-button-folder {
+  background: #fff4d7;
+  color: #8a5b00;
+  border-color: #ead59a;
+}
+
+.icon-button-code {
+  background: #007acc;
+  color: #fff;
+  border-color: #006bb3;
+}
+
+.icon-button-code:hover {
+  background: #006bb3;
+}
+
+.icon-button-code svg {
+  stroke-width: 1.9;
 }
 
 .icon-button svg {

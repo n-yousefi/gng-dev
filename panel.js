@@ -1,9 +1,7 @@
 const els = {
   refreshButton: document.getElementById('refreshButton'),
   searchInput: document.getElementById('searchInput'),
-  customOnlyToggle: document.getElementById('customOnlyToggle'),
-  showAppToggle: document.getElementById('showAppToggle'),
-  showLibraryToggle: document.getElementById('showLibraryToggle'),
+  filterButtons: Array.from(document.querySelectorAll('.filter-button')),
   indexFileInput: document.getElementById('indexFileInput'),
   statusText: document.getElementById('statusText'),
   componentCount: document.getElementById('componentCount'),
@@ -25,13 +23,13 @@ const state = {
   sourceIndex: new Map(),
   loadedIndexCount: 0,
   projectRoot: '',
+  ownerFilter: 'app',
 };
 
 init();
 
 async function init() {
   bindEvents();
-  syncFilterControlState();
   setStatus('Loading source index...');
   const bundledManifest = await window.GIGSourceLoader.loadBundledManifest();
   const bundledEntries = bundledManifest.entries;
@@ -56,12 +54,13 @@ async function init() {
 function bindEvents() {
   els.refreshButton.addEventListener('click', () => refresh());
   els.searchInput.addEventListener('input', () => applyTreeFilters());
-  els.customOnlyToggle.addEventListener('change', () => {
-    syncFilterControlState();
-    applyTreeFilters();
-  });
-  els.showAppToggle.addEventListener('change', () => applyTreeFilters());
-  els.showLibraryToggle.addEventListener('change', () => applyTreeFilters());
+  for (const button of els.filterButtons) {
+    button.addEventListener('click', () => {
+      state.ownerFilter = button.dataset.filter || 'all';
+      syncFilterButtons();
+      applyTreeFilters();
+    });
+  }
   els.indexFileInput.addEventListener('change', handleIndexFileSelected);
   els.detailsContent.addEventListener('click', handleDetailsClick);
   chrome.runtime?.onMessage?.addListener(message => {
@@ -75,9 +74,10 @@ function bindEvents() {
   }
 }
 
-function syncFilterControlState() {
-  els.showAppToggle.disabled = els.customOnlyToggle.checked;
-  els.showLibraryToggle.disabled = els.customOnlyToggle.checked;
+function syncFilterButtons() {
+  for (const button of els.filterButtons) {
+    button.classList.toggle('active', button.dataset.filter === state.ownerFilter);
+  }
 }
 
 function getPendingContextInspect() {
@@ -206,13 +206,12 @@ function renderTreeList(nodes) {
     badges.className = 'badges';
     badges.appendChild(createBadge(owner === 'created' ? 'App' : owner === 'framework' ? 'GNG' : node.kind, owner));
     if (source.componentTs) badges.appendChild(createBadge('ts', 'debug'));
-    if (node.hasAngularDebugApi) badges.appendChild(createBadge('debug', 'debug'));
 
     const actions = document.createElement('span');
     actions.className = 'tree-actions';
     if (source.componentTs) {
       const openFileButton = document.createElement('button');
-      openFileButton.className = 'icon-button tree-action-button';
+      openFileButton.className = 'icon-button icon-button-code tree-action-button';
       openFileButton.type = 'button';
       openFileButton.title = 'Open component in VS Code';
       openFileButton.setAttribute('aria-label', 'Open component in VS Code');
@@ -304,7 +303,7 @@ function renderDetails(node) {
   if (node.hasAngularDebugApi) els.detailsBadges.appendChild(createBadge('Angular debug', 'debug'));
   if (sourceInfo.componentTs) {
     const openFileButton = document.createElement('button');
-    openFileButton.className = 'icon-button';
+    openFileButton.className = 'icon-button icon-button-code';
     openFileButton.type = 'button';
     openFileButton.title = 'Open component in VS Code';
     openFileButton.setAttribute('aria-label', 'Open component in VS Code');
@@ -473,7 +472,7 @@ function pathActionButtons(path) {
 
 function iconButton(name, title, attrs) {
   return `
-    <button class="icon-button" type="button" ${attrs} title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+    <button class="icon-button icon-button-${escapeHtml(name)}" type="button" ${attrs} title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
       ${iconSvg(name)}
     </button>
   `;
@@ -593,9 +592,6 @@ function activateTab(name) {
 
 function applyTreeFilters() {
   const query = els.searchInput.value.trim().toLowerCase();
-  const customOnly = els.customOnlyToggle.checked;
-  const showApp = els.showAppToggle.checked;
-  const showLibrary = els.showLibraryToggle.checked;
   let visibleCount = 0;
 
   document.querySelectorAll('.tree-node').forEach(row => {
@@ -605,9 +601,10 @@ function applyTreeFilters() {
     const sourceResult = window.GIGSourceLoader.findSource(node, state.sourceIndex);
     const source = sourceResult.source || {};
     const owner = getNodeOwner(node, sourceResult);
-    const kindVisible = customOnly
-      ? owner === 'created'
-      : (node.kind === 'app' && showApp) || (node.kind === 'library' && showLibrary) || node.kind === 'unknown';
+    const kindVisible =
+      state.ownerFilter === 'all' ||
+      (state.ownerFilter === 'app' && owner === 'created') ||
+      (state.ownerFilter === 'gng' && owner === 'framework');
     const haystack = [
       node.selector,
       node.componentClassName,
@@ -638,7 +635,7 @@ function applyTreeFilters() {
     item.classList.toggle('hidden-by-filter', !ownRowVisible && !childVisible);
   });
 
-  const mode = customOnly ? 'app' : 'visible';
+  const mode = state.ownerFilter === 'all' ? 'visible' : state.ownerFilter;
   els.componentCount.textContent = `${visibleCount}/${state.scan?.count || 0} ${mode}`;
 }
 
