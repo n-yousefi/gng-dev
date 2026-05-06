@@ -494,8 +494,14 @@ input {
   border-bottom: 0;
   border-radius: 4px 4px 0 0;
   background: transparent;
+  color: var(--muted);
   padding: 7px 10px;
   cursor: pointer;
+}
+
+.tab:hover {
+  background: var(--panel-soft);
+  color: var(--text);
 }
 
 .tab.active {

@@ -35,7 +35,6 @@ const state = {
   parentById: new Map(),
   pins: new Map(),
   scanDiff: null,
-  problems: [],
   highlightEnabled: true,
 };
 
@@ -189,34 +188,6 @@ function computeScanDiff(previousScan, currentScan) {
   return { added, removed };
 }
 
-function computeProblems(scan, previousSelectedKey) {
-  const problems = [];
-  if (!scan?.angularDebugApi) {
-    problems.push({ severity: 'warning', title: 'Angular debug API unavailable', detail: 'Runtime component instance metadata may be limited.' });
-  }
-
-  const selectorCounts = new Map();
-  for (const node of scan?.flatNodes || []) {
-    selectorCounts.set(node.selector, (selectorCounts.get(node.selector) || 0) + 1);
-    const sourceResult = window.GIGSourceLoader.findSource(node, state.sourceIndex);
-    const source = sourceResult.source || {};
-    const owner = getNodeOwner(node, sourceResult);
-    if (!sourceResult.found) problems.push({ severity: 'info', title: 'Missing source index', detail: node.selector });
-    if (sourceResult.found && !source.templateUrl) problems.push({ severity: 'warning', title: 'Missing template path', detail: node.selector });
-    if (owner === 'unknown') problems.push({ severity: 'info', title: 'Unknown owner', detail: node.selector });
-  }
-
-  for (const [selector, count] of selectorCounts) {
-    if (count > 1) problems.push({ severity: 'info', title: 'Duplicate selector', detail: `${selector} appears ${count} times.` });
-  }
-
-  if (previousSelectedKey && !Array.from(state.flatById.values()).some(node => getNodeKey(node) === previousSelectedKey)) {
-    problems.push({ severity: 'warning', title: 'Selected component changed', detail: 'The previously selected component is no longer present after refresh.' });
-  }
-
-  return problems;
-}
-
 async function handleIndexFileSelected(event) {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -229,7 +200,6 @@ async function handleIndexFileSelected(event) {
     state.projectRoot = Array.isArray(json) ? '' : normalizePath(json.projectRoot || '');
     setStatus(`Loaded ${entries.length} indexed components from ${file.name}.`);
     if (state.scan) {
-      state.problems = computeProblems(state.scan, '');
       renderTree(state.scan.tree);
       renderPins();
     } else {
@@ -255,12 +225,10 @@ async function refresh() {
       throw new Error(result?.message || 'Scan failed.');
     }
     const previousScan = state.scan;
-    const previousSelectedKey = state.selectedId ? getNodeKey(state.flatById.get(state.selectedId)) : '';
     state.scan = result;
     state.flatById = new Map(result.flatNodes.map(node => [node.id, node]));
     state.parentById = buildParentMap(result.tree);
     state.scanDiff = computeScanDiff(previousScan, result);
-    state.problems = computeProblems(result, previousSelectedKey);
     state.selectedId = null;
     state.collapsedIds.clear();
     state.focusRootId = null;
@@ -392,6 +360,21 @@ function renderTreeList(nodes) {
         openVsCodePath(resolveProjectPath(source.componentTs));
       });
       actions.appendChild(openFileButton);
+    }
+    const componentFileName = getComponentFileName(source);
+    if (componentFileName) {
+      const copyFileNameButton = document.createElement('button');
+      copyFileNameButton.className = 'icon-button icon-button-copy tree-action-button';
+      copyFileNameButton.type = 'button';
+      copyFileNameButton.title = 'Copy component .ts filename';
+      copyFileNameButton.setAttribute('aria-label', 'Copy component .ts filename');
+      copyFileNameButton.innerHTML = iconSvg('copy');
+      copyFileNameButton.addEventListener('click', event => {
+        event.stopPropagation();
+        copyText(componentFileName);
+        setStatus(`Copied ${componentFileName}.`);
+      });
+      actions.appendChild(copyFileNameButton);
     }
     const copyPathButton = document.createElement('button');
     copyPathButton.className = 'icon-button icon-button-path tree-action-button';
@@ -618,6 +601,13 @@ function renderDetails(node) {
     openFileButton.innerHTML = iconSvg('code');
     els.detailsBadges.appendChild(openFileButton);
   }
+  const componentFileName = getComponentFileName(sourceInfo);
+  if (componentFileName) {
+    els.detailsBadges.appendChild(createHeaderActionButton('copy', 'Copy component .ts filename', () => {
+      copyText(componentFileName);
+      setStatus(`Copied ${componentFileName}.`);
+    }, 'copy'));
+  }
   els.detailsBadges.appendChild(createHeaderActionButton('path', 'Copy component path', () => {
     copyText(getComponentPath(node.id));
     setStatus('Copied component path.');
@@ -630,8 +620,13 @@ function renderDetails(node) {
   document.getElementById('tab-component').innerHTML = renderComponentInfo(node, source);
   document.getElementById('tab-template').innerHTML = renderTemplate(source);
   document.getElementById('tab-changes').innerHTML = renderChanges();
-  document.getElementById('tab-problems').innerHTML = renderProblems();
   document.getElementById('tab-dom').innerHTML = `<pre class="code-block">${escapeHtml(node.domPreview || '')}</pre>`;
+}
+
+function getComponentFileName(source) {
+  if (source.componentFileName) return source.componentFileName;
+  const componentPath = normalizePath(source.componentTs || '');
+  return componentPath ? componentPath.split('/').pop() : '';
 }
 
 function createHeaderActionButton(iconName, title, onClick, className = iconName) {
@@ -744,15 +739,6 @@ function renderSummaryItem(node, type) {
       <span>${highlightText(node.selector)}</span>
       ${node.componentClassName ? `<span class="secondary">${highlightText(node.componentClassName)}</span>` : ''}
     </div>
-  `;
-}
-
-function renderProblems() {
-  if (!state.problems.length) return '<div class="notice">No scan problems found.</div>';
-  return `
-    <table class="kv">
-      ${state.problems.map(problem => row(problem.title, problem.detail || problem.severity)).join('')}
-    </table>
   `;
 }
 
