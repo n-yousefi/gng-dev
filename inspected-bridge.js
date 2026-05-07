@@ -56,9 +56,33 @@
     return 'unknown';
   }
 
+  function getOwnAngularComponent(element) {
+    try {
+      return window.ng?.getComponent?.(element) || null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function getComponentSelector(component) {
+    const selectors = component?.constructor?.ɵcmp?.selectors;
+    if (!Array.isArray(selectors)) return null;
+
+    for (const selectorGroup of selectors) {
+      if (!Array.isArray(selectorGroup)) continue;
+      const selector = selectorGroup.find(part => typeof part === 'string' && part && /^[a-z][a-z0-9-]*$/i.test(part));
+      if (selector) return selector.toLowerCase();
+    }
+
+    return null;
+  }
+
   function getAngularMetadata(element) {
+    const ownComponent = getOwnAngularComponent(element);
     const metadata = {
       hasAngularDebugApi: Boolean(window.ng),
+      isComponentHost: Boolean(ownComponent),
+      componentSelector: getComponentSelector(ownComponent),
       componentClassName: null,
       directiveNames: [],
       inputs: [],
@@ -68,8 +92,9 @@
     };
 
     try {
-      const component = window.ng?.getComponent?.(element) || window.ng?.getOwningComponent?.(element);
+      const component = ownComponent || window.ng?.getOwningComponent?.(element);
       if (component) {
+        metadata.componentSelector ||= getComponentSelector(component);
         metadata.componentClassName = component.constructor?.name || null;
         const ioMetadata = getComponentIoMetadata(component);
         metadata.inputs = ioMetadata.inputs;
@@ -209,13 +234,31 @@
     return prefixes.some(prefix => tag.startsWith(prefix));
   }
 
+  function getComponentMatchSelector(element) {
+    const tag = element.tagName.toLowerCase();
+    if (matchesPrefixes(element, DEFAULT_PREFIXES)) return tag;
+
+    const selector = getComponentSelector(getOwnAngularComponent(element));
+    return selector || tag;
+  }
+
+  function isScannableComponentElement(element, prefixes) {
+    const tag = element.tagName.toLowerCase();
+    if (matchesPrefixes(element, prefixes)) return true;
+
+    const selector = getComponentSelector(getOwnAngularComponent(element));
+    return Boolean(selector && prefixes.some(prefix => selector.startsWith(prefix)));
+  }
+
   function createNode(element, id) {
-    const selector = element.tagName.toLowerCase();
+    const rawSelector = element.tagName.toLowerCase();
     const angular = getAngularMetadata(element);
+    const selector = angular.componentSelector || rawSelector;
     const className = angular.componentClassName;
     return {
       id,
       selector,
+      rawSelector,
       displayName: className || selector,
       kind: getKind(selector),
       elementPath: getElementPath(element),
@@ -268,7 +311,7 @@
     const prefixes = options.prefixes || DEFAULT_PREFIXES;
     const elements = new Map();
     const idByElement = new WeakMap();
-    const candidates = Array.from(document.querySelectorAll('*')).filter(element => matchesPrefixes(element, prefixes));
+    const candidates = Array.from(document.querySelectorAll('*')).filter(element => isScannableComponentElement(element, prefixes));
     const flatNodes = [];
 
     candidates.forEach((element, index) => {
@@ -363,7 +406,7 @@
   function findNearestComponentElement(start, prefixes = DEFAULT_PREFIXES) {
     let current = start instanceof Element ? start : null;
     while (current) {
-      if (matchesPrefixes(current, prefixes)) return current;
+      if (isScannableComponentElement(current, prefixes)) return current;
       current = current.parentElement;
     }
     return null;
@@ -377,11 +420,12 @@
   }
 
   function selectLastContextComponent(options = {}) {
-    const preferredPrefixes = options.preferredPrefixes || ['sl-', 'app-'];
+    const preferredPrefixes = Array.isArray(options.preferredPrefixes) ? options.preferredPrefixes : [];
     const fallbackPrefixes = options.prefixes || DEFAULT_PREFIXES;
-    const componentElement =
-      findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, preferredPrefixes) ||
-      findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, fallbackPrefixes);
+    const preferredElement = preferredPrefixes.length
+      ? findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, preferredPrefixes)
+      : null;
+    const componentElement = preferredElement || findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, fallbackPrefixes);
     if (!componentElement) {
       return { ok: false, message: 'No component host was found for the last right-clicked element.' };
     }
@@ -391,7 +435,7 @@
       return {
         ok: false,
         needsRefresh: true,
-        selector: componentElement.tagName.toLowerCase(),
+        selector: getComponentMatchSelector(componentElement),
         elementPath: getElementPath(componentElement),
         message: 'Component exists, but it is not in the current scan. Refreshing can link it.',
       };
@@ -400,7 +444,7 @@
     return {
       ok: true,
       id,
-      selector: componentElement.tagName.toLowerCase(),
+      selector: getComponentMatchSelector(componentElement),
       elementPath: getElementPath(componentElement),
     };
   }
