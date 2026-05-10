@@ -2,7 +2,7 @@
 
 Chrome DevTools extension for inspecting rendered GIG/GNG Angular component trees.
 
-It is built for local development of the TotalSales Angular frontend, but it can scan any inspected page for component host selectors with these prefixes:
+It can scan any inspected page for component host selectors with these prefixes:
 
 - `sl-*`
 - `gsm-*`
@@ -15,9 +15,9 @@ It is built for local development of the TotalSales Angular frontend, but it can
 - Adds a **GIG Components** panel to Chrome DevTools.
 - Scans the inspected page and builds a rendered component tree from DOM nesting.
 - Shows host attributes, classes, DOM path, Angular debug metadata when available, and safe component instance summaries.
-- Includes a **Created only** toggle for hiding GNG/GIG/GSM framework components and focusing on `sl-*` / `app-*` components.
-- Shows indexed source metadata such as component class, relative `.component.ts` path, `.component.html` path, component folder, and route/page hints.
-- Loads `.component.html` template source from a generated component index.
+- Resolves component source paths from the generated local `component-index.json` in this extension folder.
+- Opens indexed `.component.ts` / `.component.html` files in VS Code.
+- Rebuilds the source index through Chrome Native Messaging with the refresh icon in the DevTools panel.
 - Double-clicking a tree node calls `inspect(element)` to select the real component host in the Elements panel.
 
 ## Install
@@ -26,34 +26,60 @@ It is built for local development of the TotalSales Angular frontend, but it can
 2. Go to `chrome://extensions`.
 3. Enable **Developer mode**.
 4. Click **Load unpacked**.
-5. Select this folder:
-
-```text
-C:\Users\Yousefi.Naser\Desktop\personal\gng-dev
-```
-
-6. Open a local/dev Angular app page.
-7. Open DevTools.
-8. Click the **GIG Components** panel.
-9. Click **Refresh**.
-
-## Generate Template Source Index
-
-The extension can discover rendered DOM components without an index. To show `.component.html` content, relative `.component.ts` paths, class names, and created/framework ownership, generate `component-index.json`.
-
-From this folder:
+5. Select this extension folder.
+6. Copy `.env.sample` to `.env`.
+7. Set `TOTALSALES_ROOT` in `.env`.
+8. Register the native host:
 
 ```powershell
-node .\scripts\build-component-index.js "C:\Users\Yousefi.Naser\Desktop\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp"
+powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1
 ```
 
-The generated file is written to:
+9. Reload the unpacked extension in `chrome://extensions`.
+
+The extension ID is fixed by `manifest.json`:
 
 ```text
-component-index.json
+pnimpbggomkfmajomfnmpnfllnancnkk
 ```
 
-Reload the unpacked extension after generating it, or use **Load index** inside the DevTools panel and select the JSON file.
+If you change the manifest key, set `CHROME_EXTENSION_ID` in `.env` and rerun the registration script.
+
+## Configuration
+
+`.env` is local machine configuration and is intentionally ignored by git.
+
+Example:
+
+```text
+TOTALSALES_ROOT=C:\Path\To\TotalSales
+```
+
+Optional values:
+
+```text
+CLIENT_APP_ROOT=C:\Path\To\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp
+GNG_COMPONENT_INDEX_SCRIPT=C:\Path\To\TotalSales\Tools\gng-component-index.js
+CHROME_EXTENSION_ID=pnimpbggomkfmajomfnmpnfllnancnkk
+```
+
+## Source Index
+
+The recommended generator lives in the target project:
+
+```text
+<TotalSalesRoot>\Tools\gng-component-index.js
+```
+
+The panel refresh icon asks the native host to run that generator and write:
+
+```text
+.\component-index.json
+```
+
+That file is generated next to the extension files and ignored by git. When it does not exist, the refresh icon is red. While rebuilding it shows a loading state, then turns green and shows the update time and indexed component count.
+
+Chrome's native messaging manifest is generated under `.\native\com.gng.dev_indexer.json` by the registration script. Chrome requires that manifest and the host launcher path to be absolute, so the generated file is local machine state and is ignored by git.
 
 ## How Double Click Works
 
@@ -69,8 +95,8 @@ This is the supported DevTools way to select a DOM node in the Elements panel. I
 
 - Angular production builds may not expose `window.ng`, so component class names and instance summaries can be unavailable.
 - The component tree shows rendered component hosts, not every declared component in source.
-- Template source requires `component-index.json` or another source mapping path.
-- GNG/GIG/GSM framework components are treated as framework components. The **Created only** toggle keeps `sl-*` and `app-*` components visible and hides framework rows unless they contain visible created children.
+- Template source and VS Code file paths require `component-index.json`.
+- GNG/GIG/GSM framework components are treated as framework components.
 - Library components such as `gig-crud-table` and `gng-data-grid` may not have local template source in the app project.
 - The extension does not mutate application state or Angular components.
 
@@ -86,6 +112,7 @@ The extension is intentionally vanilla JavaScript:
 - `panel.js`
 - `inspected-bridge.js`
 - `source-loader.js`
-- `scripts/build-component-index.js`
+- `native/gng-index-host.js`
+- `scripts/register-native-host.ps1`
 
 No frontend app build is required.

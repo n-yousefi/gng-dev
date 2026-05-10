@@ -10,6 +10,11 @@
     return (path || '').replace(/\\/g, '/');
   }
 
+  function templatePathFromComponent(componentTs) {
+    const normalized = normalizePath(componentTs);
+    return normalized ? normalized.replace(/\.ts$/i, '.html') : '';
+  }
+
   function getSelectorFamily(selector) {
     const normalized = normalizeSelector(selector);
     if (FRAMEWORK_PREFIXES.some(prefix => normalized.startsWith(prefix))) return 'framework';
@@ -19,18 +24,14 @@
 
   function enrichEntry(entry) {
     const componentTs = normalizePath(entry.componentTs);
-    const templateUrl = normalizePath(entry.templateUrl);
+    const templateUrl = templatePathFromComponent(componentTs);
     const family = entry.selectorFamily || getSelectorFamily(entry.selector);
     return {
       ...entry,
       selectorFamily: family,
-      ownerType: entry.ownerType || (family === 'framework' ? 'framework' : family === 'created' ? 'created' : 'unknown'),
       componentTs,
       templateUrl,
-      styleUrls: (entry.styleUrls || []).map(normalizePath),
       componentFileName: entry.componentFileName || componentTs.split('/').pop() || '',
-      templateFileName: entry.templateFileName || templateUrl.split('/').pop() || '',
-      componentDir: entry.componentDir || componentTs.split('/').slice(0, -1).join('/'),
     };
   }
 
@@ -55,11 +56,9 @@
     const indexed = index?.get(selector);
     if (indexed) {
       return {
-        found: Boolean(indexed.templateHtml || indexed.templateUrl || indexed.componentTs),
+        found: Boolean(indexed.templateUrl || indexed.componentTs),
         source: indexed,
-        message: indexed.templateHtml
-          ? 'Template loaded from component index.'
-          : 'Component index found source paths, but no templateHtml was included.',
+        message: 'Component index found source paths.',
       };
     }
 
@@ -76,9 +75,8 @@
   function isCreatedComponent(node, index) {
     const source = findSource(node, index).source;
     const selectorFamily = source?.selectorFamily || getSelectorFamily(node?.selector);
-    const ownerType = source?.ownerType || selectorFamily;
-    if (ownerType === 'created' || selectorFamily === 'created') return true;
-    if (ownerType === 'framework' || selectorFamily === 'framework') return false;
+    if (selectorFamily === 'created') return true;
+    if (selectorFamily === 'framework') return false;
     return getSelectorFamily(node?.selector) === 'created';
   }
 
@@ -89,12 +87,13 @@
 
   async function loadBundledManifest() {
     try {
-      const response = await fetch(chrome.runtime.getURL('component-index.json'));
+      const response = await fetch(chrome.runtime.getURL('component-index.json'), { cache: 'no-store' });
       if (!response.ok) return { entries: [], projectRoot: '' };
       const json = await response.json();
       return {
         entries: Array.isArray(json) ? json : json.components || [],
         projectRoot: Array.isArray(json) ? '' : normalizePath(json.projectRoot || ''),
+        generatedAt: Array.isArray(json) ? '' : json.generatedAt || '',
       };
     } catch (_error) {
       return { entries: [], projectRoot: '' };

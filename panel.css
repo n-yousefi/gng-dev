@@ -10,6 +10,7 @@
   --accent-strong: #1a73e8;
   --accent-soft: rgba(138, 180, 248, 0.18);
   --danger: #f28b82;
+  --success: #81c995;
   --warning: #fdd663;
   --code-bg: #151619;
   --code-text: #e8eaed;
@@ -34,7 +35,7 @@ input {
 
 .toolbar {
   display: grid;
-  grid-template-columns: auto minmax(200px, 1fr) auto auto auto minmax(120px, auto);
+  grid-template-columns: auto minmax(180px, 1fr) auto minmax(260px, auto) auto auto minmax(120px, auto);
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -67,6 +68,74 @@ input {
   border-radius: 4px;
   background: var(--bg);
   color: var(--text);
+}
+
+.index-refresh-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+}
+
+.index-refresh-button.is-ready {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.index-refresh-button.is-missing,
+.index-refresh-button.is-error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.index-refresh-button.is-loading {
+  border-color: var(--danger);
+  color: var(--danger);
+  cursor: progress;
+}
+
+.index-refresh-button.is-loading .refresh-icon {
+  animation: spin 0.8s linear infinite;
+}
+
+.refresh-icon {
+  display: inline-block;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.index-meta {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast {
+  position: fixed;
+  top: 48px;
+  right: 12px;
+  z-index: 20;
+  max-width: min(420px, calc(100vw - 24px));
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #1f3326;
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 8px 10px;
+}
+
+.toast.error {
+  background: #3b2424;
+  border-color: var(--danger);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .toggle {

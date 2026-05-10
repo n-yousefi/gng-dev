@@ -3,8 +3,14 @@
 const fs = require('fs');
 const path = require('path');
 
-const defaultProjectRoot = 'C:\\Users\\Yousefi.Naser\\Desktop\\TotalSales\\Gng.TotalSales.UI\\GIG.App.Sl\\ClientApp';
-const projectRoot = path.resolve(process.argv[2] || defaultProjectRoot);
+const defaultProjectRoot = process.env.CLIENT_APP_ROOT || '';
+const projectRootArg = process.argv[2] || defaultProjectRoot;
+if (!projectRootArg) {
+  console.error('Usage: node scripts/build-component-index.js <ClientAppRoot> [outFile]');
+  process.exit(1);
+}
+
+const projectRoot = path.resolve(projectRootArg);
 const sourceRoot = path.join(projectRoot, 'projects', 'gig-app-sl', 'src', 'lib');
 const outFile = path.resolve(process.argv[3] || path.join(__dirname, '..', 'component-index.json'));
 

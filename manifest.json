@@ -2,11 +2,12 @@
   "manifest_version": 3,
   "name": "GIG Component Inspector",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4WKW4L2+ZwoG46mi4zDiwFQyGSqAY+UrXIluFaNOLQsv0DzmhO6sHrA83j25PIh2OK2sHPHZg8Qy5+VnxTUznLoKr0RkUe4/WQ3Z+LF0F2i8Q0kkc0A3oOAKmcRnD0I7AldrVPV+/q0pZl8PT8pwGpTGaqGAoIMdDNuZugGkhRqslp3LCEDMBrLkOyHR2p9ib/Ho0nxMLXthN8m4cBEgSZniDZHS5UkPdM/3VTctHssQ3Sl8XmXLaNBT/wJWDkP0oMg/cc+ZoMHlYOM+fUwq7yTricSUjKgoI5HiEMI/LIlWngJQqG+4efBWn0luNqKGDhOV/nho+PTxk1TBjuM6tQIDAQAB",
   "description": "DevTools panel for inspecting rendered GIG/GNG Angular component trees.",
   "devtools_page": "devtools.html",
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["contextMenus"],
-  "host_permissions": []
+  "permissions": ["contextMenus", "nativeMessaging"],
+  "host_permissions": ["file:///*"]
 }
