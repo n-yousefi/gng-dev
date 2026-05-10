@@ -1,110 +1,59 @@
-# GIG Component Inspector
+# راهنمای سریع GIG Component Inspector
 
-Chrome DevTools extension for inspecting rendered GIG/GNG Angular component trees.
+این افزونه برای inspect کردن کامپوننت‌های Angular/GIG داخل صفحه است. با آن می‌توانید کامپوننت‌های رندر شده را ببینید، کامپوننت‌های پروژه را از روی index پیدا کنید، و فایل `.ts` هر کامپوننت را مستقیم در VS Code باز کنید.
 
-It can scan any inspected page for component host selectors with these prefixes:
+## نصب
 
-- `sl-*`
-- `gsm-*`
-- `gig-*`
-- `gng-*`
-- `app-*`
-
-## Features
-
-- Adds a **GIG Components** panel to Chrome DevTools.
-- Scans the inspected page and builds a rendered component tree from DOM nesting.
-- Shows host attributes, classes, DOM path, Angular debug metadata when available, and safe component instance summaries.
-- Resolves component source paths from the generated local `component-index.json` in this extension folder.
-- Opens indexed `.component.ts` / `.component.html` files in VS Code.
-- Rebuilds the source index through Chrome Native Messaging with the refresh icon in the DevTools panel.
-- Double-clicking a tree node calls `inspect(element)` to select the real component host in the Elements panel.
-
-## Install
-
-1. Open Chrome.
-2. Go to `chrome://extensions`.
-3. Enable **Developer mode**.
-4. Click **Load unpacked**.
-5. Select this extension folder.
-6. Copy `.env.sample` to `.env`.
-7. Set `CLIENT_APP_ROOT` in `.env`.
-8. Register the native host:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1
-```
-
-9. Reload the unpacked extension in `chrome://extensions`.
-
-The extension ID is fixed by `manifest.json`:
-
-```text
-pnimpbggomkfmajomfnmpnfllnancnkk
-```
-
-If you change the manifest key, set `CHROME_EXTENSION_ID` in `.env` and rerun the registration script.
-
-## Configuration
-
-`.env` is local machine configuration and is intentionally ignored by git.
-
-Example:
+1. در Chrome به `chrome://extensions` بروید.
+2. گزینه `Developer mode` را روشن کنید.
+3. روی `Load unpacked` بزنید و پوشه افزونه را انتخاب کنید.
+4. فایل `.env.sample` را به `.env` کپی کنید.
+5. مسیر پوشه نهایی `ClientApp` پروژه را در `.env` تنظیم کنید:
 
 ```text
 CLIENT_APP_ROOT=C:\Path\To\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp
 ```
 
-Optional value:
+6. اسکریپت ثبت Native Host را اجرا کنید:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1
+```
+
+7. افزونه را در صفحه `chrome://extensions` دوباره `Reload` کنید.
+
+## استفاده
+
+1. صفحه مورد نظر را باز کنید.
+2. DevTools را با `F12` باز کنید.
+3. تب `GIG Components` را انتخاب کنید.
+4. دکمه `Refresh` بالای پنل، کامپوننت‌های رندر شده در صفحه را لود می‌کند. البته این اتفاق بصورت خودکار در زمان لود شدن صفحه و تغییر در صفحه اتفاق می افتد و معمولا نیازی به رفرش دستی نیست.
+5. آیکون سبز/قرمز کنار جستجو، کامپوننت ها را اسکن کرده و ایندکس را می‌سازد.
+6. با انتخاب هر کامپوننت، اطلاعات اصلی، ویژگی ها و مسیر فایل آن نمایش داده می‌شود.
+7. دکمه کد کنار عنوان کامپوننت، فایل `.ts` را در VS Code باز می‌کند.
+
+## فیلتر کامپوننت‌ها
+
+فیلتر `All` همه کامپوننت‌های پیدا شده در صفحه را نشان می‌دهد.
+
+فیلتر `Components` فقط کامپوننت‌هایی را نشان می‌دهد که ایندکس شده‌اند. یعنی مسیر فایل سورس آن‌ها مشخص شده است و می‌تواند فایل `.ts` همان کامپوننت را مستقیم در VS Code باز کند. این فیلتر برای وقتی خوب است که می‌خواهید فقط روی کامپوننت‌های قابل ویرایش پروژه تمرکز کنید.
+
+فیلتر `GNG` کامپوننت‌های فریم‌ورکی مثل `gng-*`، `gig-*` و `gsm-*` را جدا می‌کند.
+
+## منوی راست کلیک
+
+گزینه `Find Component in GNG DevTools` برای پیدا کردن کامپوننت مربوط به المنتی است که روی آن راست کلیک کرده‌اید.
+
+این گزینه وقتی بهترین نتیجه را می‌دهد که DevTools باز باشد و تب `GIG Components` را انتخاب کرده باشید. اگر کامپوننت در فیلتر فعلی پنهان باشد، افزونه به صورت خودکار فیلتر را روی `All` می‌برد و کامپوننت را انتخاب می‌کند.
+
+کروم به افزونه‌ها اجازه نمی‌دهد DevTools را خودکار باز کنند یا به صورت خودکار به تب افزونه داخل DevTools بروند. بنابراین اگر DevTools بسته باشد، اول آن را دستی باز کنید و بعد تب `GIG Components` را انتخاب کنید.
+
+## فایل‌های محلی
+
+این فایل‌ها مخصوص سیستم شما هستند و نباید commit شوند:
 
 ```text
-CHROME_EXTENSION_ID=pnimpbggomkfmajomfnmpnfllnancnkk
+.env
+component-index.json
+native/com.gng.dev_indexer.json
 ```
-
-## Source Index
-
-The panel refresh icon asks the native host to run the extension's own index builder against `CLIENT_APP_ROOT` and write:
-
-```text
-.\component-index.json
-```
-
-That file is generated next to the extension files and ignored by git. When it does not exist, the refresh icon is red. While rebuilding it shows a loading state, then turns green and shows the update time and indexed component count.
-
-Chrome's native messaging manifest is generated under `.\native\com.gng.dev_indexer.json` by the registration script. Chrome requires that manifest and the host launcher path to be absolute, so the generated file is local machine state and is ignored by git.
-
-## How Double Click Works
-
-The panel stores a temporary ID for each discovered component host. On double click it evaluates this in the inspected page:
-
-```js
-inspect(element)
-```
-
-This is the supported DevTools way to select a DOM node in the Elements panel. If the DOM changed since the last scan, refresh the component tree and try again.
-
-## Limitations
-
-- Angular production builds may not expose `window.ng`, so component class names and instance summaries can be unavailable.
-- The component tree shows rendered component hosts, not every declared component in source.
-- Template source and VS Code file paths require `component-index.json`.
-- GNG/GIG/GSM framework components are treated as framework components.
-- Library components such as `gig-crud-table` and `gng-data-grid` may not have local template source in the app project.
-- The extension does not mutate application state or Angular components.
-
-## Development Notes
-
-The extension is intentionally vanilla JavaScript:
-
-- `manifest.json`
-- `devtools.html`
-- `devtools.js`
-- `panel.html`
-- `panel.css`
-- `panel.js`
-- `inspected-bridge.js`
-- `source-loader.js`
-- `native/gng-index-host.js`
-- `scripts/register-native-host.ps1`
-
-No frontend app build is required.
