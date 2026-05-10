@@ -47,19 +47,6 @@ function readStringProperty(block, propertyName) {
   return match ? match[2].trim() : null;
 }
 
-function readStringArrayProperty(block, propertyName) {
-  const regex = new RegExp(`${propertyName}\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'm');
-  const match = block.match(regex);
-  if (!match) return [];
-  const items = [];
-  const itemRegex = /(['"`])([\s\S]*?)\1/g;
-  let itemMatch;
-  while ((itemMatch = itemRegex.exec(match[1])) !== null) {
-    items.push(itemMatch[2].trim());
-  }
-  return items;
-}
-
 function readClassName(text) {
   const match = text.match(/export\s+class\s+([A-Za-z0-9_]+)/);
   return match ? match[1] : null;
@@ -80,25 +67,11 @@ function extractComponentBlock(text) {
   return null;
 }
 
-function readTemplateHtml(componentFile, templateUrl, inlineTemplate) {
-  if (inlineTemplate) return inlineTemplate;
-  if (!templateUrl) return null;
-  const fullPath = path.resolve(path.dirname(componentFile), templateUrl);
-  if (!fs.existsSync(fullPath)) return null;
-  return fs.readFileSync(fullPath, 'utf8');
-}
-
 function selectorFamily(selector) {
   const normalized = (selector || '').toLowerCase();
   if (frameworkPrefixes.some(prefix => normalized.startsWith(prefix))) return 'framework';
   if (createdPrefixes.some(prefix => normalized.startsWith(prefix))) return 'created';
   return 'unknown';
-}
-
-function routeHint(relativeComponentPath) {
-  return relativeComponentPath
-    .replace(/^projects\/gig-app-sl\/src\/lib\//, '')
-    .replace(/\/[^/]+\.component\.ts$/, '');
 }
 
 function createEntry(file) {
@@ -110,27 +83,15 @@ function createEntry(file) {
   const selector = readStringProperty(block, 'selector');
   if (!selector) return null;
 
-  const templateUrl = readStringProperty(block, 'templateUrl');
-  const inlineTemplate = readStringProperty(block, 'template');
-  const styleUrls = readStringArrayProperty(block, 'styleUrls');
-  const templateFullPath = templateUrl ? path.resolve(path.dirname(file), templateUrl) : null;
   const componentTs = normalizePath(file);
-  const templatePath = templateFullPath ? normalizePath(templateFullPath) : null;
   const family = selectorFamily(selector);
 
   return {
     selector,
     selectorFamily: family,
-    ownerType: family,
     className: readClassName(text),
     componentTs,
     componentFileName: path.basename(file),
-    componentDir: path.dirname(componentTs).replace(/\\/g, '/'),
-    routeHint: routeHint(componentTs),
-    templateUrl: templatePath,
-    templateFileName: templatePath ? path.basename(templatePath) : null,
-    styleUrls: styleUrls.map(styleUrl => normalizePath(path.resolve(path.dirname(file), styleUrl))),
-    templateHtml: readTemplateHtml(file, templateUrl, inlineTemplate),
   };
 }
 
@@ -146,7 +107,7 @@ function main() {
     .sort((a, b) => a.selector.localeCompare(b.selector));
 
   const counts = entries.reduce((acc, entry) => {
-    acc[entry.ownerType] = (acc[entry.ownerType] || 0) + 1;
+    acc[entry.selectorFamily] = (acc[entry.selectorFamily] || 0) + 1;
     return acc;
   }, {});
 

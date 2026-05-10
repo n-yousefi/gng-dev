@@ -34,7 +34,7 @@ const state = {
   sourceIndex: new Map(),
   loadedIndexCount: 0,
   projectRoot: "",
-  ownerFilter: "app",
+  ownerFilter: "all",
   collapsedIds: new Set(),
   focusRootId: null,
   parentById: new Map(),
@@ -65,6 +65,7 @@ async function init() {
 
 function bindEvents() {
   els.highlightToggle.checked = state.highlightEnabled;
+  syncFilterButtons();
   els.refreshButton.addEventListener("click", () => refresh());
   els.searchInput.addEventListener("input", () => handleSearchChanged());
   els.indexRefreshButton.addEventListener("click", () => rebuildIndexWithNativeHost());
@@ -943,12 +944,33 @@ async function selectLastRightClickedComponent() {
     }
 
     if (!result?.ok) throw new Error(result?.message || "Could not find a component for the right-clicked element.");
+    makeNodeSelectableInCurrentView(result.id);
     selectNode(result.id, { reveal: true });
     activateTab("overview");
     setStatus(`Opened ${result.selector} from page right-click.`);
   } catch (error) {
     setStatus(error.message || String(error), true);
   }
+}
+
+function makeNodeSelectableInCurrentView(id) {
+  if (!isNodeHiddenInTree(id)) return;
+
+  if (state.ownerFilter !== "all") {
+    state.ownerFilter = "all";
+    syncFilterButtons();
+    applyTreeFilters();
+  }
+
+  if (isNodeHiddenInTree(id) && els.searchInput.value) {
+    els.searchInput.value = "";
+    applyTreeFilters();
+  }
+}
+
+function isNodeHiddenInTree(id) {
+  const row = document.querySelector(`.tree-node[data-id="${cssEscape(id)}"]`);
+  return !row || row.classList.contains("hidden-by-filter") || Boolean(row.closest(".tree-item.hidden-by-filter"));
 }
 
 function resolveProjectPath(path) {

@@ -10,21 +10,20 @@
     <header class="toolbar">
       <button id="refreshButton" type="button" title="Refresh component tree">Refresh</button>
       <div class="segmented-filter" role="group" aria-label="Component owner filter">
-        <button class="filter-button" type="button" data-filter="all">All</button>        
+        <button class="filter-button active" type="button" data-filter="all">All</button>
         <button class="filter-button" type="button" data-filter="components">Components</button>
-        <button class="filter-button active" style="display: none;" type="button" data-filter="app">APP</button>
         <button class="filter-button" type="button" data-filter="gng">GNG</button>
-      </div>      
+      </div>
       <input id="searchInput" type="search" placeholder="Search selector, class, path, attributes" />
       <button id="indexRefreshButton" class="index-refresh-button is-missing" type="button" title="Refresh component index" aria-label="Refresh component index">
         <span class="refresh-icon" aria-hidden="true">&#8635;</span>
       </button>
       <span id="statusText" class="status">Idle</span>
-      <span id="indexMeta" class="index-meta">No index</span>      
+      <span id="indexMeta" class="index-meta">No index</span>
       <label class="toggle" title="Outline selected or hovered components on the inspected page.">
         <input id="highlightToggle" type="checkbox" />
         <span>Highlight on page</span>
-      </label>      
+      </label>
     </header>
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 

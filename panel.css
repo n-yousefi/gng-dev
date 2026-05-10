@@ -17,6 +17,26 @@
   font-family: "Segoe UI", Arial, sans-serif;
 }
 
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f8fafd;
+    --panel: #ffffff;
+    --panel-soft: #f1f3f4;
+    --line: #dadce0;
+    --line-strong: #bdc1c6;
+    --text: #202124;
+    --muted: #5f6368;
+    --accent: #185abc;
+    --accent-strong: #1a73e8;
+    --accent-soft: rgba(26, 115, 232, 0.12);
+    --danger: #b3261e;
+    --success: #137333;
+    --warning: #b06000;
+    --code-bg: #f1f3f4;
+    --code-text: #202124;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -35,7 +55,7 @@ input {
 
 .toolbar {
   display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) auto minmax(260px, auto) auto auto minmax(120px, auto);
+  grid-template-columns: auto auto minmax(180px, 1fr) auto auto minmax(180px, 0.7fr) auto;
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -121,14 +141,14 @@ input {
   max-width: min(420px, calc(100vw - 24px));
   border: 1px solid var(--line-strong);
   border-radius: 6px;
-  background: #1f3326;
+  background: var(--panel);
   color: var(--text);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   padding: 8px 10px;
 }
 
 .toast.error {
-  background: #3b2424;
+  background: var(--panel);
   border-color: var(--danger);
 }
 
@@ -204,6 +224,18 @@ input {
   display: grid;
   grid-template-columns: minmax(260px, 34%) minmax(420px, 1fr);
   height: calc(100vh - 45px);
+}
+
+@media (max-width: 900px) {
+  .toolbar {
+    grid-template-columns: auto auto minmax(160px, 1fr) auto;
+  }
+
+  .status,
+  .index-meta,
+  .toggle {
+    grid-column: span 2;
+  }
 }
 
 .tree-pane,

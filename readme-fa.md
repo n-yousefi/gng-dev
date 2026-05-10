@@ -8,10 +8,10 @@
 2. گزینه Developer mode را روشن کنید.
 3. روی Load unpacked بزنید و پوشه افزونه را انتخاب کنید.
 4. فایل `.env.sample` را به `.env` کپی کنید.
-5. مسیر پروژه را در `.env` تنظیم کنید:
+5. مسیر پوشه نهایی `ClientApp` را در `.env` تنظیم کنید:
 
 ```text
-TOTALSALES_ROOT=C:\Path\To\TotalSales
+CLIENT_APP_ROOT=C:\Path\To\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp
 ```
 
 6. اسکریپت ثبت Native Host را اجرا کنید:
@@ -36,8 +36,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1
 
 گزینه `Find Component in GNG DevTools"` فقط وقتی DevTools و تب افزونه باز باشد می‌تواند همان کامپوننت را در پنل انتخاب کند.
 
-Chrome به افزونه‌ها اجازه نمی‌دهد DevTools را خودکار باز کنند یا به صورت خودکار به تب افزونه داخل DevTools بروند. بنابراین اگر DevTools بسته باشد، اول آن را دستی باز کنید و بعد تب `GIG Components` را انتخاب کنید.
-
-## نکته
-
-فایل‌های `.env`، `component-index.json` و `native/com.gng.dev_indexer.json` محلی هستند و نباید commit شوند.
+کروم به افزونه‌ها اجازه نمی‌دهد DevTools را خودکار باز کنند یا به صورت خودکار به تب افزونه داخل DevTools بروند. بنابراین اگر DevTools بسته باشد، اول آن را دستی باز کنید و بعد تب `GIG Components` را انتخاب کنید.

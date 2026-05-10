@@ -24,21 +24,15 @@ function Read-DotEnv([string]$Path) {
 
 $extensionRoot = Split-Path $PSScriptRoot -Parent
 $env = Read-DotEnv $EnvPath
-$totalSalesRoot = $env["TOTALSALES_ROOT"]
 $clientAppRoot = $env["CLIENT_APP_ROOT"]
-if (!$totalSalesRoot -and !$clientAppRoot) {
-  throw "TOTALSALES_ROOT or CLIENT_APP_ROOT is missing in $EnvPath"
+if (!$clientAppRoot) {
+  throw "CLIENT_APP_ROOT is missing in $EnvPath"
 }
 
-$totalSalesRoot = if ($totalSalesRoot) { [System.IO.Path]::GetFullPath($totalSalesRoot) } else { "" }
-$clientAppRoot = if ($clientAppRoot) { [System.IO.Path]::GetFullPath($clientAppRoot) } else { "" }
-$indexScript = if ($env["GNG_COMPONENT_INDEX_SCRIPT"]) {
-  [System.IO.Path]::GetFullPath($env["GNG_COMPONENT_INDEX_SCRIPT"])
-} else {
-  if (!$totalSalesRoot) {
-    throw "GNG_COMPONENT_INDEX_SCRIPT is required when only CLIENT_APP_ROOT is configured."
-  }
-  Join-Path $totalSalesRoot "Tools\gng-component-index.js"
+$clientAppRoot = [System.IO.Path]::GetFullPath($clientAppRoot)
+$indexScript = Join-Path $extensionRoot "scripts\build-component-index.js"
+if (!(Test-Path -LiteralPath $clientAppRoot)) {
+  throw "ClientApp root not found: $clientAppRoot"
 }
 if (!(Test-Path -LiteralPath $indexScript)) {
   throw "Index script not found: $indexScript"
@@ -72,9 +66,5 @@ Set-Item -Path $registryPath -Value $hostManifest
 
 Write-Host "Registered $hostName"
 Write-Host "Manifest: $hostManifest"
-if ($totalSalesRoot) {
-  Write-Host "TotalSales root: $totalSalesRoot"
-} else {
-  Write-Host "ClientApp root: $clientAppRoot"
-}
+Write-Host "ClientApp root: $clientAppRoot"
 Write-Host "Extension ID: $extensionId"

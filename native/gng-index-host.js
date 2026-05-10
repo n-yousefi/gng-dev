@@ -6,6 +6,7 @@ const HOST_DIR = __dirname;
 const EXTENSION_ROOT = path.resolve(HOST_DIR, '..');
 const ENV_PATH = path.join(EXTENSION_ROOT, '.env');
 const LOCAL_INDEX_PATH = path.join(EXTENSION_ROOT, 'component-index.json');
+const INDEX_SCRIPT = path.join(EXTENSION_ROOT, 'scripts', 'build-component-index.js');
 
 function readEnv(filePath) {
   const env = {};
@@ -25,22 +26,15 @@ function readEnv(filePath) {
 
 function getConfig() {
   const env = readEnv(ENV_PATH);
-  if (!env.TOTALSALES_ROOT && !env.CLIENT_APP_ROOT) {
-    throw new Error(`TOTALSALES_ROOT or CLIENT_APP_ROOT is missing in ${ENV_PATH}. Copy .env.sample to .env and configure it.`);
+  if (!env.CLIENT_APP_ROOT) {
+    throw new Error(`CLIENT_APP_ROOT is missing in ${ENV_PATH}. Copy .env.sample to .env and configure it.`);
   }
 
-  const totalSalesRoot = env.TOTALSALES_ROOT ? path.resolve(env.TOTALSALES_ROOT) : null;
-  const clientAppRoot = env.CLIENT_APP_ROOT
-    ? path.resolve(env.CLIENT_APP_ROOT)
-    : path.join(totalSalesRoot, 'Gng.TotalSales.UI', 'GIG.App.Sl', 'ClientApp');
-  const indexScript = env.GNG_COMPONENT_INDEX_SCRIPT
-    ? path.resolve(env.GNG_COMPONENT_INDEX_SCRIPT)
-    : path.join(totalSalesRoot || path.resolve(clientAppRoot, '..', '..', '..'), 'Tools', 'gng-component-index.js');
+  const clientAppRoot = path.resolve(env.CLIENT_APP_ROOT);
 
   return {
-    totalSalesRoot: totalSalesRoot || path.resolve(clientAppRoot, '..', '..', '..'),
     clientAppRoot,
-    indexScript,
+    indexScript: INDEX_SCRIPT,
     outFile: LOCAL_INDEX_PATH,
   };
 }
@@ -64,7 +58,7 @@ function handleMessage(message) {
   }
 
   const result = spawnSync(process.execPath, [config.indexScript, config.clientAppRoot, config.outFile], {
-    cwd: config.totalSalesRoot,
+    cwd: EXTENSION_ROOT,
     encoding: 'utf8',
     windowsHide: true,
   });

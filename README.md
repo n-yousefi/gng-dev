@@ -28,7 +28,7 @@ It can scan any inspected page for component host selectors with these prefixes:
 4. Click **Load unpacked**.
 5. Select this extension folder.
 6. Copy `.env.sample` to `.env`.
-7. Set `TOTALSALES_ROOT` in `.env`.
+7. Set `CLIENT_APP_ROOT` in `.env`.
 8. Register the native host:
 
 ```powershell
@@ -52,26 +52,18 @@ If you change the manifest key, set `CHROME_EXTENSION_ID` in `.env` and rerun th
 Example:
 
 ```text
-TOTALSALES_ROOT=C:\Path\To\TotalSales
+CLIENT_APP_ROOT=C:\Path\To\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp
 ```
 
-Optional values:
+Optional value:
 
 ```text
-CLIENT_APP_ROOT=C:\Path\To\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp
-GNG_COMPONENT_INDEX_SCRIPT=C:\Path\To\TotalSales\Tools\gng-component-index.js
 CHROME_EXTENSION_ID=pnimpbggomkfmajomfnmpnfllnancnkk
 ```
 
 ## Source Index
 
-The recommended generator lives in the target project:
-
-```text
-<TotalSalesRoot>\Tools\gng-component-index.js
-```
-
-The panel refresh icon asks the native host to run that generator and write:
+The panel refresh icon asks the native host to run the extension's own index builder against `CLIENT_APP_ROOT` and write:
 
 ```text
 .\component-index.json
