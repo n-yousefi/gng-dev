@@ -77,7 +77,7 @@ function bindEvents() {
       state.ownerFilter = button.dataset.filter || "all";
       syncFilterButtons();
       applyTreeFilters();
-      if (state.ownerFilter === "all" && state.selectedId) selectNode(state.selectedId, { reveal: true, keepHighlight: true });
+      syncSelectionWithActiveFilter();
     });
   }
   els.detailsContent.addEventListener("click", handleDetailsClick);
@@ -562,6 +562,44 @@ function getComponentPath(id) {
     .join(" > ");
 }
 
+function getNodeSourceResult(node) {
+  return window.GIGSourceLoader.findSource(node, state.sourceIndex);
+}
+
+function isIndexedComponent(node) {
+  if (!node) return false;
+  const sourceResult = getNodeSourceResult(node);
+  const source = sourceResult.source || {};
+  return getNodeOwner(node, sourceResult) === "created" && Boolean(source.componentTs);
+}
+
+function getNearestIndexedComponent(id) {
+  const ancestors = getComponentAncestors(id);
+  for (let index = ancestors.length - 1; index >= 0; index--) {
+    if (isIndexedComponent(ancestors[index])) return ancestors[index];
+  }
+  return null;
+}
+
+function syncSelectionWithActiveFilter() {
+  if (!state.selectedId) return;
+  if (state.ownerFilter === "components") {
+    const indexedNode = getNearestIndexedComponent(state.selectedId);
+    if (indexedNode) {
+      ensureTreeNodeRendered(indexedNode.id);
+      selectNode(indexedNode.id, { reveal: true, keepHighlight: indexedNode.id === state.selectedId });
+    }
+    return;
+  }
+  if (state.ownerFilter === "all") selectNode(state.selectedId, { reveal: true, keepHighlight: true });
+}
+
+function ensureTreeNodeRendered(id) {
+  if (document.querySelector(`.tree-node[data-id="${cssEscape(id)}"]`) || !state.focusRootId) return;
+  state.focusRootId = null;
+  renderTree(state.scan?.tree || []);
+}
+
 function isPinned(node) {
   return state.pins.has(getNodeKey(node));
 }
@@ -737,17 +775,36 @@ function showEmptyDetails() {
 
 function renderOverview(node, sourceResult) {
   const source = sourceResult.source || {};
+  const parentComponent = source.componentTs ? null : getNearestIndexedComponent(node.id);
 
   return `
     <table class="kv">
       ${row("Selector", node.selector)}
       ${row("Source class", source.className || "Not indexed")}
+      ${parentComponent ? parentComponentRow(parentComponent) : ""}
       ${pathRow("Component .ts", source.componentTs)}
       ${pathRow("Template .html", source.templateUrl)}
       ${row("Children", String(node.childIds?.length || 0))}
     </table>
     <h2 class="section-title">Attributes</h2>
     ${renderObjectTable(node.attributes, "No host attributes.")}
+  `;
+}
+
+function parentComponentRow(node) {
+  const source = getNodeSource(node);
+  const label = [node.selector, source.className || node.componentClassName].filter(Boolean).join(" - ");
+  return `
+    <tr>
+      <th>${escapeHtml("Parent component")}</th>
+      <td>
+        <span class="cell-value">${highlightText(label || node.selector)}</span>
+        <span class="row-actions">
+          ${copyButton(label || node.selector)}
+          ${pathActionButtons(source.componentTs)}
+        </span>
+      </td>
+    </tr>
   `;
 }
 
