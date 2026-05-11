@@ -3,6 +3,7 @@
   const VERSION = 1;
   const DEFAULT_PREFIXES = ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
   const HIGHLIGHT_ID = '__gigComponentInspectorHighlight';
+  const IVY_COMPONENT_DEFINITION_KEY = '\u0275cmp';
 
   function safeString(value, maxLength = 300) {
     if (value == null) return '';
@@ -27,11 +28,15 @@
       if (current.id) {
         part += `#${current.id}`;
       } else {
-        const sameTagSiblings = Array.from(current.parentElement?.children || []).filter(
-          sibling => sibling.tagName === current.tagName
-        );
-        if (sameTagSiblings.length > 1) {
-          part += `:nth-of-type(${sameTagSiblings.indexOf(current) + 1})`;
+        let sameTagCount = 0;
+        let sameTagIndex = 0;
+        for (const sibling of current.parentElement?.children || []) {
+          if (sibling.tagName !== current.tagName) continue;
+          sameTagCount++;
+          if (sibling === current) sameTagIndex = sameTagCount;
+        }
+        if (sameTagCount > 1) {
+          part += `:nth-of-type(${sameTagIndex})`;
         }
       }
       parts.unshift(part);
@@ -64,8 +69,12 @@
     }
   }
 
+  function getAngularDefinition(component) {
+    return component?.constructor?.[IVY_COMPONENT_DEFINITION_KEY] || null;
+  }
+
   function getComponentSelector(component) {
-    const selectors = component?.constructor?.ɵcmp?.selectors;
+    const selectors = getAngularDefinition(component)?.selectors;
     if (!Array.isArray(selectors)) return null;
 
     for (const selectorGroup of selectors) {
@@ -122,7 +131,7 @@
   }
 
   function getComponentIoMetadata(component) {
-    const definition = component?.constructor?.ɵcmp;
+    const definition = getAngularDefinition(component);
     return {
       inputs: normalizeIoDefinition(definition?.inputs),
       outputs: normalizeIoDefinition(definition?.outputs),
@@ -283,6 +292,7 @@
 
   function buildTree(nodes, elementById, idByElement) {
     const roots = [];
+    const nodeById = new Map(nodes.map(node => [node.id, node]));
     for (const node of nodes) {
       const element = elementById.get(node.id);
       let parent = element.parentElement;
@@ -291,7 +301,7 @@
       while (parent) {
         const parentId = idByElement.get(parent);
         if (parentId) {
-          parentNode = nodes.find(candidate => candidate.id === parentId);
+          parentNode = nodeById.get(parentId);
           break;
         }
         parent = parent.parentElement;
@@ -311,15 +321,16 @@
     const prefixes = options.prefixes || DEFAULT_PREFIXES;
     const elements = new Map();
     const idByElement = new WeakMap();
-    const candidates = Array.from(document.querySelectorAll('*')).filter(element => isScannableComponentElement(element, prefixes));
     const flatNodes = [];
+    const scanId = Date.now();
 
-    candidates.forEach((element, index) => {
-      const id = `cmp-${Date.now()}-${index}`;
+    for (const element of document.querySelectorAll('*')) {
+      if (!isScannableComponentElement(element, prefixes)) continue;
+      const id = `cmp-${scanId}-${flatNodes.length}`;
       elements.set(id, element);
       idByElement.set(element, id);
       flatNodes.push(createNode(element, id));
-    });
+    }
 
     const tree = buildTree(flatNodes, elements, idByElement);
     window[GLOBAL_KEY].elements = elements;

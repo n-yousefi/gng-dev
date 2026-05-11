@@ -44,6 +44,7 @@ const state = {
   indexUpdatedAt: localStorage.getItem(INDEX_UPDATED_STORAGE_KEY) || "",
   scanSummary: "",
   refreshInFlight: false,
+  refreshQueued: false,
   autoRefreshTimeoutId: null,
 };
 
@@ -190,12 +191,23 @@ function sendNativeMessage(message) {
 
 function getPendingContextInspect() {
   return new Promise((resolve) => {
-    chrome.runtime?.sendMessage?.(
+    if (!chrome.runtime?.sendMessage || typeof chrome.devtools?.inspectedWindow?.tabId !== "number") {
+      resolve(false);
+      return;
+    }
+
+    chrome.runtime.sendMessage(
       {
         type: "gig-panel-ready",
         tabId: chrome.devtools.inspectedWindow.tabId,
       },
-      (response) => resolve(Boolean(response?.hasPendingContextInspect)),
+      (response) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+          return;
+        }
+        resolve(Boolean(response?.hasPendingContextInspect));
+      },
     );
   });
 }
@@ -269,9 +281,13 @@ function computeScanDiff(previousScan, currentScan) {
 }
 
 async function refresh() {
-  if (state.refreshInFlight) return;
+  if (state.refreshInFlight) {
+    state.refreshQueued = true;
+    return;
+  }
   state.refreshInFlight = true;
   try {
+    state.refreshQueued = false;
     setStatus("Injecting bridge...");
     await ensureBridge();
     setStatus("Scanning inspected page...");
@@ -297,6 +313,9 @@ async function refresh() {
     setStatus(error.message || String(error), true);
   } finally {
     state.refreshInFlight = false;
+    if (state.refreshQueued && !document.hidden) {
+      refresh();
+    }
   }
 }
 
@@ -956,6 +975,11 @@ async function selectLastRightClickedComponent() {
 function makeNodeSelectableInCurrentView(id) {
   if (!isNodeHiddenInTree(id)) return;
 
+  if (state.focusRootId) {
+    state.focusRootId = null;
+    renderTree(state.scan?.tree || []);
+  }
+
   if (state.ownerFilter !== "all") {
     state.ownerFilter = "all";
     syncFilterButtons();
@@ -1058,9 +1082,10 @@ function applyTreeFilters() {
 }
 
 function getNodeOwner(node, sourceResult) {
-  if (window.GIGSourceLoader.isCreatedComponent(node, state.sourceIndex)) return "created";
   const source = sourceResult?.source || window.GIGSourceLoader.findSource(node, state.sourceIndex).source || {};
-  if (source.selectorFamily === "framework") return "framework";
+  const selectorFamily = source.selectorFamily || window.GIGSourceLoader.getSelectorFamily(node?.selector);
+  if (selectorFamily === "created") return "created";
+  if (selectorFamily === "framework") return "framework";
   if (node.kind === "library") return "framework";
   if (node.kind === "app") return "created";
   return "unknown";
