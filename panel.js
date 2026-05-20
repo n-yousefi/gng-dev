@@ -25,6 +25,7 @@ const NATIVE_HOST_NAME = "com.gng.dev_indexer";
 const LOCAL_INDEX_FILE = "component-index.json";
 const INDEX_UPDATED_STORAGE_KEY = "gigComponentInspector.indexUpdatedAt";
 const AUTO_REFRESH_DELAY_MS = 600;
+const DEFAULT_SCAN_PREFIXES = ["sl-", "gsm-", "gig-", "gng-", "app-"];
 
 const state = {
   bridgeInjected: false,
@@ -32,7 +33,10 @@ const state = {
   flatById: new Map(),
   selectedId: null,
   sourceIndex: new Map(),
+  scanPrefixes: DEFAULT_SCAN_PREFIXES,
+  scanSelectors: [],
   loadedIndexCount: 0,
+  projectName: "",
   projectRoot: "",
   ownerFilter: "all",
   collapsedIds: new Set(),
@@ -118,35 +122,84 @@ async function loadLocalIndex() {
   try {
     setIndexButtonState("loading");
     setStatus("Loading component index...");
-    const manifest = await window.GIGSourceLoader.loadBundledManifest();
-    if (!manifest.entries.length) {
-      state.sourceIndex = new Map();
-      state.loadedIndexCount = 0;
-      state.projectRoot = "";
-      updateIndexMeta();
-      setIndexButtonState("missing");
-      setStatus("Component index is missing. Click refresh index to create it.", true);
-      return false;
-    }
+    const nativeManifest = await loadIndexFromNativeHost();
+    const manifest = nativeManifest || await window.GIGSourceLoader.loadBundledManifest();
+    const loaded = applyIndexManifest(manifest);
+    if (!loaded) return false;
 
-    state.sourceIndex = window.GIGSourceLoader.createIndex(manifest.entries);
-    state.loadedIndexCount = manifest.entries.length;
-    state.projectRoot = manifest.projectRoot || "";
-    state.indexUpdatedAt = manifest.generatedAt || state.indexUpdatedAt || "";
-    if (state.indexUpdatedAt) localStorage.setItem(INDEX_UPDATED_STORAGE_KEY, state.indexUpdatedAt);
-    updateIndexMeta();
-    setIndexButtonState("ready");
-    setStatus(`Loaded ${manifest.entries.length} indexed components.`);
     refreshSourceDependentViews();
     return true;
   } catch (error) {
-    state.sourceIndex = new Map();
-    state.loadedIndexCount = 0;
-    updateIndexMeta();
-    setIndexButtonState("error");
+    clearIndexState();
+    setIndexButtonState("missing");
     setStatus(`Could not load component index: ${error.message}`, true);
     return false;
   }
+}
+
+function clearIndexState() {
+  state.sourceIndex = new Map();
+  state.scanPrefixes = DEFAULT_SCAN_PREFIXES;
+  state.scanSelectors = [];
+  state.loadedIndexCount = 0;
+  state.projectName = "";
+  state.projectRoot = "";
+  updateIndexMeta();
+}
+
+function normalizeIndexManifest(value, project = {}) {
+  const source = value || {};
+  const entries = Array.isArray(source) ? source : source.entries || source.components || [];
+  return {
+    entries,
+    projectName: project.name || source.projectName || "",
+    projectRoot: Array.isArray(source) ? "" : normalizePath(source.projectRoot || project.clientAppRoot || ""),
+    generatedAt: Array.isArray(source) ? "" : source.generatedAt || "",
+  };
+}
+
+function applyIndexManifest(value, project = {}) {
+  const manifest = normalizeIndexManifest(value, project);
+  if (!manifest.entries.length) {
+    clearIndexState();
+    setIndexButtonState("missing");
+    setStatus("Component index is missing. Click refresh index to create it.", true);
+    return false;
+  }
+
+  state.sourceIndex = window.GIGSourceLoader.createIndex(manifest.entries);
+  state.scanPrefixes = DEFAULT_SCAN_PREFIXES;
+  state.scanSelectors = getScanSelectors(manifest.entries);
+  state.loadedIndexCount = manifest.entries.length;
+  state.projectName = manifest.projectName;
+  state.projectRoot = manifest.projectRoot;
+  state.indexUpdatedAt = manifest.generatedAt || state.indexUpdatedAt || "";
+  if (state.indexUpdatedAt) localStorage.setItem(INDEX_UPDATED_STORAGE_KEY, state.indexUpdatedAt);
+  updateIndexMeta();
+  setIndexButtonState("ready");
+  setStatus(`Loaded ${manifest.entries.length} indexed components${manifest.projectName ? ` for ${manifest.projectName}` : ""}.`);
+  return true;
+}
+
+async function loadIndexFromNativeHost() {
+  try {
+    const pageUrl = await getInspectedPageUrl();
+    const result = await sendNativeMessage({ type: "getIndex", pageUrl });
+    if (!result?.ok) throw new Error(result?.error || "Native host could not load the project index.");
+    return normalizeIndexManifest(result.index, result.project);
+  } catch (error) {
+    if (!isNativeUnavailableError(error)) throw error;
+    return null;
+  }
+}
+
+function isNativeUnavailableError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return (
+    message.includes("native messaging is not available") ||
+    message.includes("native messaging host not found") ||
+    message.includes("specified native messaging host not found")
+  );
 }
 
 async function rebuildIndexWithNativeHost() {
@@ -154,14 +207,14 @@ async function rebuildIndexWithNativeHost() {
     setIndexButtonState("loading");
     setStatus("Rebuilding index...");
     els.indexRefreshButton.disabled = true;
-    const result = await sendNativeMessage({ type: "rebuildIndex" });
+    const pageUrl = await getInspectedPageUrl();
+    const result = await sendNativeMessage({ type: "rebuildIndex", pageUrl });
     if (!result?.ok) throw new Error(result?.error || "Native host failed to rebuild the index.");
 
-    state.indexUpdatedAt = result.generatedAt || new Date().toISOString();
-    localStorage.setItem(INDEX_UPDATED_STORAGE_KEY, state.indexUpdatedAt);
-    const loaded = await loadLocalIndex();
-    if (!loaded) throw new Error(`Index was rebuilt but ${LOCAL_INDEX_FILE} could not be loaded.`);
-    showToast(`Index refreshed. Loaded ${state.loadedIndexCount} components.`);
+    if (!applyIndexManifest(result.index, result.project)) {
+      throw new Error(`Index was rebuilt but no components were loaded.`);
+    }
+    showToast(`Index refreshed. Loaded ${state.loadedIndexCount} components${state.projectName ? ` for ${state.projectName}` : ""}.`);
   } catch (error) {
     setIndexButtonState("error");
     setStatus(`Could not rebuild index: ${error.message}`, true);
@@ -212,6 +265,10 @@ function getPendingContextInspect() {
   });
 }
 
+function getInspectedPageUrl() {
+  return evalInInspectedPage("location.href").catch(() => "");
+}
+
 async function setPageHighlightEnabled(enabled) {
   state.highlightEnabled = Boolean(enabled);
   try {
@@ -257,6 +314,19 @@ function getNodeSource(node) {
   return window.GIGSourceLoader.findSource(node, state.sourceIndex).source || {};
 }
 
+function getScanSelectors(entries = []) {
+  const selectors = new Set();
+  for (const entry of entries) {
+    const selector = String(entry?.selector || "").trim().toLowerCase();
+    if (selector) selectors.add(selector);
+  }
+  return Array.from(selectors).sort();
+}
+
+function createScanExpression(methodName) {
+  return `window.__gigComponentInspector.${methodName}(${JSON.stringify({ prefixes: state.scanPrefixes, selectors: state.scanSelectors })})`;
+}
+
 function getNodeKey(node) {
   if (!node) return "";
   const source = getNodeSource(node);
@@ -291,7 +361,7 @@ async function refresh() {
     setStatus("Injecting bridge...");
     await ensureBridge();
     setStatus("Scanning inspected page...");
-    const result = await evalInInspectedPage(`window.__gigComponentInspector.scan({ prefixes: ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'] })`);
+    const result = await evalInInspectedPage(createScanExpression("scan"));
     if (!result?.ok) {
       throw new Error(result?.message || "Scan failed.");
     }
@@ -1012,11 +1082,11 @@ function openVsCodeLocation(path, line, column) {
 async function selectLastRightClickedComponent() {
   try {
     await ensureBridge();
-    let result = await evalInInspectedPage(`window.__gigComponentInspector.selectLastContextComponent({ prefixes: ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'] })`);
+    let result = await evalInInspectedPage(createScanExpression("selectLastContextComponent"));
 
     if (!result?.ok && result?.needsRefresh) {
       await refresh();
-      result = await evalInInspectedPage(`window.__gigComponentInspector.selectLastContextComponent({ prefixes: ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'] })`);
+      result = await evalInInspectedPage(createScanExpression("selectLastContextComponent"));
     }
 
     if (!result?.ok) throw new Error(result?.message || "Could not find a component for the right-clicked element.");
@@ -1140,6 +1210,7 @@ function applyTreeFilters() {
 
 function getNodeOwner(node, sourceResult) {
   const source = sourceResult?.source || window.GIGSourceLoader.findSource(node, state.sourceIndex).source || {};
+  if (source.componentTs) return "created";
   const selectorFamily = source.selectorFamily || window.GIGSourceLoader.getSelectorFamily(node?.selector);
   if (selectorFamily === "created") return "created";
   if (selectorFamily === "framework") return "framework";
@@ -1169,6 +1240,7 @@ function updateIndexMeta() {
   const summary = state.loadedIndexCount ? `Index: ${state.loadedIndexCount} components` : "No index";
   const updated = formatIndexUpdatedAt(state.indexUpdatedAt);
   const parts = [summary];
+  if (state.projectName) parts.push(state.projectName);
   if (updated) parts.push(`Updated ${updated}`);
   if (state.scanSummary) parts.push(state.scanSummary);
   els.indexMeta.textContent = parts.join(" · ");

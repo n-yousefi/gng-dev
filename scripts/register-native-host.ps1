@@ -24,15 +24,45 @@ function Read-DotEnv([string]$Path) {
 
 $extensionRoot = Split-Path $PSScriptRoot -Parent
 $env = Read-DotEnv $EnvPath
-$clientAppRoot = $env["CLIENT_APP_ROOT"]
-if (!$clientAppRoot) {
-  throw "CLIENT_APP_ROOT is missing in $EnvPath"
+
+function Get-ConfiguredProjectRoots($Env) {
+  $roots = New-Object System.Collections.Generic.List[string]
+  if ($Env["CLIENT_APP_ROOT"]) {
+    $roots.Add($Env["CLIENT_APP_ROOT"])
+  }
+
+  foreach ($key in $Env.Keys) {
+    foreach ($field in @("CLIENT_APP_ROOT", "APP_ROOT", "ROOT")) {
+      if ($key.StartsWith("PROJECT_") -and $key.EndsWith("_$field")) {
+        $roots.Add($Env[$key])
+        break
+      }
+    }
+  }
+
+  if ($Env["GNG_PROJECTS"]) {
+    $Env["GNG_PROJECTS"].Split(";") | ForEach-Object {
+      $parts = $_.Split("|")
+      if ($parts.Length -ge 3) {
+        $roots.Add(($parts[2..($parts.Length - 1)] -join "|").Trim())
+      }
+    }
+  }
+
+  return $roots | Where-Object { $_ } | Select-Object -Unique
 }
 
-$clientAppRoot = [System.IO.Path]::GetFullPath($clientAppRoot)
+$projectRoots = @(Get-ConfiguredProjectRoots $env)
+if (!$projectRoots.Length) {
+  throw "No project roots are configured in $EnvPath. Set CLIENT_APP_ROOT or PROJECT_*_CLIENT_APP_ROOT."
+}
+
+$projectRoots = @($projectRoots | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
 $indexScript = Join-Path $extensionRoot "scripts\build-component-index.js"
-if (!(Test-Path -LiteralPath $clientAppRoot)) {
-  throw "ClientApp root not found: $clientAppRoot"
+foreach ($projectRoot in $projectRoots) {
+  if (!(Test-Path -LiteralPath $projectRoot)) {
+    throw "Project root not found: $projectRoot"
+  }
 }
 if (!(Test-Path -LiteralPath $indexScript)) {
   throw "Index script not found: $indexScript"
@@ -66,5 +96,6 @@ Set-Item -Path $registryPath -Value $hostManifest
 
 Write-Host "Registered $hostName"
 Write-Host "Manifest: $hostManifest"
-Write-Host "ClientApp root: $clientAppRoot"
+Write-Host "Project roots:"
+$projectRoots | ForEach-Object { Write-Host "  $_" }
 Write-Host "Extension ID: $extensionId"

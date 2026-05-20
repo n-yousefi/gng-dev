@@ -22,13 +22,19 @@
     return 'unknown';
   }
 
+  function getSelectorPrefix(selector) {
+    const match = normalizeSelector(selector).match(/^([a-z][a-z0-9]*)-/);
+    return match ? `${match[1]}-` : '';
+  }
+
   function enrichEntry(entry) {
     const componentTs = normalizePath(entry.componentTs);
     const templateUrl = templatePathFromComponent(componentTs);
-    const family = entry.selectorFamily || getSelectorFamily(entry.selector);
+    const family = componentTs ? (entry.selectorFamily || 'created') : (entry.selectorFamily || getSelectorFamily(entry.selector));
     return {
       ...entry,
       selectorFamily: family,
+      selectorPrefix: entry.selectorPrefix || getSelectorPrefix(entry.selector),
       componentTs,
       templateUrl,
       componentFileName: entry.componentFileName || componentTs.split('/').pop() || '',
@@ -46,7 +52,7 @@
 
   function selectorToPossibleTemplate(selector) {
     const cleaned = normalizeSelector(selector)
-      .replace(/^(sl|gsm|gig|gng|app)-/, '')
+      .replace(/^[a-z][a-z0-9]*-/, '')
       .replace(/[^a-z0-9-]/g, '');
     return cleaned ? `${cleaned}.component.html` : null;
   }
@@ -74,6 +80,7 @@
 
   function isCreatedComponent(node, index) {
     const source = findSource(node, index).source;
+    if (source?.componentTs) return true;
     const selectorFamily = source?.selectorFamily || getSelectorFamily(node?.selector);
     if (selectorFamily === 'created') return true;
     if (selectorFamily === 'framework') return false;

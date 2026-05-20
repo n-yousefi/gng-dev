@@ -14,11 +14,31 @@
 CLIENT_APP_ROOT=C:\Path\To\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp
 ```
 
+برای چند پروژه همزمان، به جای `CLIENT_APP_ROOT` تکی می‌توانید برای هر پروژه `BASE_URL` و `CLIENT_APP_ROOT` جدا تعریف کنید. افزونه بر اساس URL صفحه‌ای که داخل DevTools باز است، index همان پروژه را لود یا ایجاد می‌کند:
+
+```text
+PROJECT_TOTALSALES_NAME=TotalSales
+PROJECT_TOTALSALES_BASE_URL=http://localhost:4202
+PROJECT_TOTALSALES_CLIENT_APP_ROOT=C:\Path\To\TotalSales\Gng.TotalSales.UI\GIG.App.Sl\ClientApp
+
+PROJECT_SFA_NAME=SFA
+PROJECT_SFA_BASE_URL=http://localhost:4200
+PROJECT_SFA_CLIENT_APP_ROOT=C:\Path\To\SFA\Gng.ORM.SFA.UI
+
+PROJECT_SFAGENERAL_NAME=SFAGeneral
+PROJECT_SFAGENERAL_BASE_URL=http://localhost:4201
+PROJECT_SFAGENERAL_CLIENT_APP_ROOT=C:\Path\To\SFA\Gng.ORM.SFAGeneral.UI
+```
+
+اگر چند پروژه را همزمان اجرا می‌کنید، `BASE_URL` هر پروژه باید یکتا باشد. مثلا اگر SFA روی `4200` و SFAGeneral روی `4201` است، TotalSales را روی پورتی مثل `4202` اجرا کنید و همان را در `.env` بنویسید.
+
 6. اسکریپت ثبت Native Host را اجرا کنید:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1
 ```
+
+این دستور فایل `native/com.gng.dev_indexer.json` را به صورت خودکار می‌سازد و مسیر آن را در Registry کروم ثبت می‌کند. این فایل را دستی تغییر ندهید و commit نکنید. بعد از تغییر معمولی `.env` معمولا نیازی به اجرای دوباره این دستور نیست، چون Native Host در هر درخواست `.env` را دوباره می‌خواند. فقط وقتی مسیر پوشه افزونه یا Extension ID تغییر کرد، دوباره اجرا کنید.
 
 7. افزونه را در صفحه `chrome://extensions` دوباره `Reload` کنید.
 
@@ -54,6 +74,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1
 
 ```text
 .env
+.index-cache/
 component-index.json
 native/com.gng.dev_indexer.json
 ```

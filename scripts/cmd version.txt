@@ -1,0 +1,146 @@
+@echo off
+setlocal enabledelayedexpansion
+
+:: ─── Resolve paths ───────────────────────────────────────────────────────────
+set "SCRIPT_DIR=%~dp0"
+set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%") do set "EXTENSION_ROOT=%%~dpI"
+set "EXTENSION_ROOT=%EXTENSION_ROOT:~0,-1%"
+set "ENV_PATH=%EXTENSION_ROOT%\.env"
+
+:: ─── Parse .env ──────────────────────────────────────────────────────────────
+if not exist "%ENV_PATH%" (
+  echo ERROR: .env file not found: %ENV_PATH%
+  exit /b 1
+)
+
+for /f "usebackq tokens=* delims=" %%L in ("%ENV_PATH%") do (
+  set "LINE=%%L"
+  :: Skip empty lines and comments
+  if defined LINE (
+    set "FIRST2="
+    for /f "tokens=1 delims==" %%A in ("%%L") do set "RAWKEY=%%A"
+    echo !LINE! | findstr /r "^#" >nul 2>&1 && goto :skip_line
+
+    for /f "tokens=1* delims==" %%A in ("%%L") do (
+      set "ENVKEY=%%A"
+      set "ENVVAL=%%B"
+      :: Trim leading/trailing whitespace from key
+      for /f "tokens=* delims= " %%K in ("!ENVKEY!") do set "ENVKEY=%%K"
+      :: Strip surrounding quotes from value
+      if defined ENVVAL (
+        set "ENVVAL=!ENVVAL:"=!"
+        for /f "tokens=* delims= " %%V in ("!ENVVAL!") do set "ENVVAL=%%V"
+      )
+      set "DOTENV_!ENVKEY!=!ENVVAL!"
+    )
+  )
+  :skip_line
+)
+
+:: ─── Collect project roots ───────────────────────────────────────────────────
+set "ROOT_COUNT=0"
+
+:: CLIENT_APP_ROOT
+if defined DOTENV_CLIENT_APP_ROOT (
+  set /a ROOT_COUNT+=1
+  set "PROJECT_ROOT_!ROOT_COUNT!=!DOTENV_CLIENT_APP_ROOT!"
+)
+
+:: PROJECT_*_CLIENT_APP_ROOT / PROJECT_*_APP_ROOT / PROJECT_*_ROOT
+for /f "usebackq tokens=2* delims=_=" %%A in (`set DOTENV_PROJECT_ 2^>nul`) do (
+  set "FULLKEY=%%A"
+  :: Check if key ends with _CLIENT_APP_ROOT, _APP_ROOT, or _ROOT
+  echo !FULLKEY! | findstr /i "_CLIENT_APP_ROOT$" >nul 2>&1 && (
+    set /a ROOT_COUNT+=1
+    set "PROJECT_ROOT_!ROOT_COUNT!=%%B"
+  )
+  echo !FULLKEY! | findstr /i "_APP_ROOT$" >nul 2>&1 && (
+    set /a ROOT_COUNT+=1
+    set "PROJECT_ROOT_!ROOT_COUNT!=%%B"
+  )
+  echo !FULLKEY! | findstr /i "_ROOT$" >nul 2>&1 && (
+    set /a ROOT_COUNT+=1
+    set "PROJECT_ROOT_!ROOT_COUNT!=%%B"
+  )
+)
+
+:: GNG_PROJECTS  (format: name|something|path[|...] semicolon-separated)
+if defined DOTENV_GNG_PROJECTS (
+  for %%P in ("!DOTENV_GNG_PROJECTS:;=" "!") do (
+    set "PROJ_ENTRY=%%~P"
+    :: Extract field index 2 onward (0-based), i.e. everything after 2nd pipe
+    set "PIPE_COUNT=0"
+    set "PROJ_PATH="
+    for %%F in ("!PROJ_ENTRY:|=" "!") do (
+      if !PIPE_COUNT! geq 2 (
+        if defined PROJ_PATH (
+          set "PROJ_PATH=!PROJ_PATH!|%%~F"
+        ) else (
+          set "PROJ_PATH=%%~F"
+        )
+      )
+      set /a PIPE_COUNT+=1
+    )
+    if defined PROJ_PATH (
+      set /a ROOT_COUNT+=1
+      set "PROJECT_ROOT_!ROOT_COUNT!=!PROJ_PATH!"
+    )
+  )
+)
+
+if %ROOT_COUNT%==0 (
+  echo ERROR: No project roots configured in %ENV_PATH%.
+  echo        Set CLIENT_APP_ROOT or PROJECT_*_CLIENT_APP_ROOT.
+  exit /b 1
+)
+
+:: Resolve to absolute paths
+for /l %%I in (1,1,%ROOT_COUNT%) do (
+  pushd "!PROJECT_ROOT_%%I!" 2>nul || (
+    echo ERROR: Project root not found: !PROJECT_ROOT_%%I!
+    exit /b 1
+  )
+  set "PROJECT_ROOT_%%I=!CD!"
+  popd
+)
+
+:: ─── Validate index script ───────────────────────────────────────────────────
+set "INDEX_SCRIPT=%EXTENSION_ROOT%\scripts\build-component-index.js"
+if not exist "%INDEX_SCRIPT%" (
+  echo ERROR: Index script not found: %INDEX_SCRIPT%
+  exit /b 1
+)
+
+:: ─── Native host config ───────────────────────────────────────────────────────
+set "HOST_NAME=com.gng.dev_indexer"
+set "EXTENSION_ID=pnimpbggomkfmajomfnmpnfllnancnkk"
+if defined DOTENV_CHROME_EXTENSION_ID set "EXTENSION_ID=!DOTENV_CHROME_EXTENSION_ID!"
+
+set "NATIVE_DIR=%EXTENSION_ROOT%\native"
+set "HOST_CMD=%NATIVE_DIR%\gng-index-host.cmd"
+set "HOST_MANIFEST=%NATIVE_DIR%\%HOST_NAME%.json"
+
+if not exist "%HOST_CMD%" (
+  echo ERROR: Native host launcher not found: %HOST_CMD%
+  exit /b 1
+)
+
+:: ─── Write manifest JSON (no BOM, via PowerShell one-liner) ──────────────────
+set "MANIFEST_JSON={^"name^": ^"%HOST_NAME%^", ^"description^": ^"GNG Dev component index native host^", ^"path^": ^"%HOST_CMD:\=\\%^", ^"type^": ^"stdio^", ^"allowed_origins^": [^"chrome-extension://%EXTENSION_ID%/^"]}"
+
+powershell -NoProfile -Command ^
+  "[System.IO.File]::WriteAllText('%HOST_MANIFEST%', '%MANIFEST_JSON%', [System.Text.UTF8Encoding]::new($false))"
+
+:: ─── Register in HKCU ────────────────────────────────────────────────────────
+set "REG_PATH=HKCU\Software\Google\Chrome\NativeMessagingHosts\%HOST_NAME%"
+reg add "%REG_PATH%" /ve /d "%HOST_MANIFEST%" /f >nul
+
+:: ─── Done ─────────────────────────────────────────────────────────────────────
+echo Registered %HOST_NAME%
+echo Manifest: %HOST_MANIFEST%
+echo Project roots:
+for /l %%I in (1,1,%ROOT_COUNT%) do echo   !PROJECT_ROOT_%%I!
+echo Extension ID: %EXTENSION_ID%
+
+endlocal

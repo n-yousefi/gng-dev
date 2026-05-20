@@ -11,18 +11,27 @@ if (!projectRootArg) {
 }
 
 const projectRoot = path.resolve(projectRootArg);
-const sourceRoot = path.join(projectRoot, 'projects', 'gig-app-sl', 'src', 'lib');
 const outFile = path.resolve(process.argv[3] || path.join(__dirname, '..', 'component-index.json'));
 
-const frameworkPrefixes = ['gng-', 'gig-', 'gsm-'];
-const createdPrefixes = ['sl-', 'app-'];
+const ignoredDirectories = new Set([
+  '.angular',
+  '.git',
+  '.vscode',
+  'coverage',
+  'dist',
+  'e2e',
+  'node_modules',
+  'out-tsc',
+  'tmp',
+]);
 
 function walk(dir, result = []) {
   if (!fs.existsSync(dir)) return result;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      if (ignoredDirectories.has(entry.name)) continue;
+      if (normalizeAbsolutePath(fullPath).includes('/src/app/projects/')) continue;
       walk(fullPath, result);
     } else if (entry.isFile() && entry.name.endsWith('.component.ts')) {
       result.push(fullPath);
@@ -33,6 +42,10 @@ function walk(dir, result = []) {
 
 function normalizePath(filePath) {
   return path.relative(projectRoot, filePath).replace(/\\/g, '/');
+}
+
+function normalizeAbsolutePath(filePath) {
+  return path.resolve(filePath).replace(/\\/g, '/');
 }
 
 function stripComments(text) {
@@ -67,11 +80,9 @@ function extractComponentBlock(text) {
   return null;
 }
 
-function selectorFamily(selector) {
-  const normalized = (selector || '').toLowerCase();
-  if (frameworkPrefixes.some(prefix => normalized.startsWith(prefix))) return 'framework';
-  if (createdPrefixes.some(prefix => normalized.startsWith(prefix))) return 'created';
-  return 'unknown';
+function selectorPrefix(selector) {
+  const match = String(selector || '').trim().toLowerCase().match(/^([a-z][a-z0-9]*)-/);
+  return match ? `${match[1]}-` : '';
 }
 
 function createEntry(file) {
@@ -84,26 +95,95 @@ function createEntry(file) {
   if (!selector) return null;
 
   const componentTs = normalizePath(file);
-  const family = selectorFamily(selector);
 
   return {
     selector,
-    selectorFamily: family,
+    selectorFamily: 'created',
+    selectorPrefix: selectorPrefix(selector),
     className: readClassName(text),
     componentTs,
     componentFileName: path.basename(file),
   };
 }
 
+function readAngularWorkspace() {
+  const angularJsonPath = path.join(projectRoot, 'angular.json');
+  if (!fs.existsSync(angularJsonPath)) return null;
+
+  try {
+    return JSON.parse(fs.readFileSync(angularJsonPath, 'utf8'));
+  } catch (error) {
+    console.warn(`Could not parse ${angularJsonPath}: ${error.message || error}`);
+    return null;
+  }
+}
+
+function getWorkspaceSourceRoots() {
+  const workspace = readAngularWorkspace();
+  const roots = [];
+  for (const project of Object.values(workspace?.projects || {})) {
+    if (!project || project.projectType === 'application' && String(project.root || '').startsWith('e2e')) continue;
+    const sourceRoot = project.sourceRoot || (project.root ? path.join(project.root, 'src') : '');
+    if (!sourceRoot) continue;
+    const fullPath = path.resolve(projectRoot, sourceRoot);
+    if (fs.existsSync(fullPath)) roots.push(fullPath);
+  }
+  return uniqueExistingPaths(roots);
+}
+
+function uniqueExistingPaths(paths) {
+  const seen = new Set();
+  const result = [];
+  for (const item of paths) {
+    const normalized = normalizeAbsolutePath(item);
+    if (seen.has(normalized) || !fs.existsSync(item)) continue;
+    seen.add(normalized);
+    result.push(item);
+  }
+  return result;
+}
+
+function getSourceRoots() {
+  const workspaceRoots = getWorkspaceSourceRoots();
+  if (workspaceRoots.length) return workspaceRoots;
+
+  return uniqueExistingPaths([
+    path.join(projectRoot, 'projects', 'gig-app-sl', 'src', 'lib'),
+    path.join(projectRoot, 'src'),
+    path.join(projectRoot, 'projects'),
+    projectRoot,
+  ]);
+}
+
+function preferEntry(current, candidate) {
+  if (!current) return candidate;
+  const currentPath = current.componentTs || '';
+  const candidatePath = candidate.componentTs || '';
+  const currentIsMirror = currentPath.includes('/src/app/projects/');
+  const candidateIsMirror = candidatePath.includes('/src/app/projects/');
+  if (currentIsMirror !== candidateIsMirror) return candidateIsMirror ? current : candidate;
+  return candidatePath.length < currentPath.length ? candidate : current;
+}
+
+function dedupeEntries(entries) {
+  const bySelector = new Map();
+  for (const entry of entries) {
+    const key = entry.selector.toLowerCase();
+    bySelector.set(key, preferEntry(bySelector.get(key), entry));
+  }
+  return Array.from(bySelector.values());
+}
+
 function main() {
-  if (!fs.existsSync(sourceRoot)) {
-    console.error(`Source root not found: ${sourceRoot}`);
+  const sourceRoots = getSourceRoots();
+  if (!sourceRoots.length) {
+    console.error(`No Angular source roots found under: ${projectRoot}`);
     process.exit(1);
   }
 
-  const entries = walk(sourceRoot)
+  const entries = dedupeEntries(sourceRoots.flatMap(sourceRoot => walk(sourceRoot))
     .map(createEntry)
-    .filter(Boolean)
+    .filter(Boolean))
     .sort((a, b) => a.selector.localeCompare(b.selector));
 
   const counts = entries.reduce((acc, entry) => {
@@ -114,12 +194,14 @@ function main() {
   const payload = {
     generatedAt: new Date().toISOString(),
     projectRoot: projectRoot.replace(/\\/g, '/'),
+    sourceRoots: sourceRoots.map(sourceRoot => normalizePath(sourceRoot)),
     counts,
     components: entries,
   };
 
   fs.writeFileSync(outFile, JSON.stringify(payload, null, 2), 'utf8');
   console.log(`Indexed ${entries.length} components.`);
+  console.log(`Scanned roots: ${sourceRoots.map(sourceRoot => normalizePath(sourceRoot)).join(', ')}`);
   console.log(`Created/app components: ${counts.created || 0}. Framework components: ${counts.framework || 0}. Unknown: ${counts.unknown || 0}.`);
   console.log(`Wrote ${outFile}`);
 }

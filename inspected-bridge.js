@@ -243,6 +243,15 @@
     return prefixes.some(prefix => tag.startsWith(prefix));
   }
 
+  function normalizeSelectorSet(selectors) {
+    if (!Array.isArray(selectors)) return new Set();
+    return new Set(
+      selectors
+        .map(selector => String(selector || '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+  }
+
   function getComponentMatchSelector(element) {
     const tag = element.tagName.toLowerCase();
     if (matchesPrefixes(element, DEFAULT_PREFIXES)) return tag;
@@ -251,12 +260,13 @@
     return selector || tag;
   }
 
-  function isScannableComponentElement(element, prefixes) {
+  function isScannableComponentElement(element, prefixes, selectorSet = new Set()) {
     const tag = element.tagName.toLowerCase();
+    if (selectorSet.has(tag)) return true;
     if (matchesPrefixes(element, prefixes)) return true;
 
     const selector = getComponentSelector(getOwnAngularComponent(element));
-    return Boolean(selector && prefixes.some(prefix => selector.startsWith(prefix)));
+    return Boolean(selector && (selectorSet.has(selector) || prefixes.some(prefix => selector.startsWith(prefix))));
   }
 
   function createNode(element, id) {
@@ -319,13 +329,14 @@
 
   function scan(options = {}) {
     const prefixes = options.prefixes || DEFAULT_PREFIXES;
+    const selectorSet = normalizeSelectorSet(options.selectors);
     const elements = new Map();
     const idByElement = new WeakMap();
     const flatNodes = [];
     const scanId = Date.now();
 
     for (const element of document.querySelectorAll('*')) {
-      if (!isScannableComponentElement(element, prefixes)) continue;
+      if (!isScannableComponentElement(element, prefixes, selectorSet)) continue;
       const id = `cmp-${scanId}-${flatNodes.length}`;
       elements.set(id, element);
       idByElement.set(element, id);
@@ -414,10 +425,10 @@
     window[GLOBAL_KEY].lastContextElement = event.target instanceof Element ? event.target : null;
   }
 
-  function findNearestComponentElement(start, prefixes = DEFAULT_PREFIXES) {
+  function findNearestComponentElement(start, prefixes = DEFAULT_PREFIXES, selectorSet = new Set()) {
     let current = start instanceof Element ? start : null;
     while (current) {
-      if (isScannableComponentElement(current, prefixes)) return current;
+      if (isScannableComponentElement(current, prefixes, selectorSet)) return current;
       current = current.parentElement;
     }
     return null;
@@ -433,10 +444,11 @@
   function selectLastContextComponent(options = {}) {
     const preferredPrefixes = Array.isArray(options.preferredPrefixes) ? options.preferredPrefixes : [];
     const fallbackPrefixes = options.prefixes || DEFAULT_PREFIXES;
+    const selectorSet = normalizeSelectorSet(options.selectors);
     const preferredElement = preferredPrefixes.length
-      ? findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, preferredPrefixes)
+      ? findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, preferredPrefixes, selectorSet)
       : null;
-    const componentElement = preferredElement || findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, fallbackPrefixes);
+    const componentElement = preferredElement || findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, fallbackPrefixes, selectorSet);
     if (!componentElement) {
       return { ok: false, message: 'No component host was found for the last right-clicked element.' };
     }

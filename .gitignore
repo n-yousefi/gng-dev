@@ -1,3 +1,4 @@
 .env
+.index-cache/
 component-index.json
 native/com.gng.dev_indexer.json
