@@ -34,7 +34,9 @@ function walk(dir, result = []) {
       if (normalizeAbsolutePath(fullPath).includes('/src/app/projects/')) continue;
       walk(fullPath, result);
     } else if (entry.isFile() && entry.name.endsWith('.component.ts')) {
-      result.push(fullPath);
+      result.push({ path: fullPath, kind: 'component' });
+    } else if (entry.isFile() && entry.name.endsWith('-column.service.ts')) {
+      result.push({ path: fullPath, kind: 'column-service' });
     }
   }
   return result;
@@ -58,6 +60,12 @@ function readStringProperty(block, propertyName) {
   const regex = new RegExp(`${propertyName}\\s*:\\s*(['"\`])([\\s\\S]*?)\\1`, 'm');
   const match = block.match(regex);
   return match ? match[2].trim() : null;
+}
+
+function readStringArrayProperty(block, propertyName) {
+  const propertyMatch = block.match(new RegExp(`${propertyName}\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'm'));
+  if (!propertyMatch) return [];
+  return Array.from(propertyMatch[1].matchAll(/(['"`])([\s\S]*?)\1/g), match => match[2].trim()).filter(Boolean);
 }
 
 function readClassName(text) {
@@ -85,16 +93,55 @@ function selectorPrefix(selector) {
   return match ? `${match[1]}-` : '';
 }
 
-function createEntry(file) {
-  const raw = fs.readFileSync(file, 'utf8');
+function resolveComponentResource(componentPath, resourcePath) {
+  if (!resourcePath || !resourcePath.startsWith('.')) return '';
+  return normalizePath(path.resolve(path.dirname(componentPath), resourcePath));
+}
+
+function conventionalResource(componentPath, extension) {
+  const candidate = componentPath.replace(/\.ts$/i, extension);
+  return fs.existsSync(candidate) ? normalizePath(candidate) : '';
+}
+
+function readImportedColumnServices(text, componentPath) {
+  const result = [];
+  for (const match of text.matchAll(/from\s+['"]([^'"]+-column\.service)['"]/g)) {
+    if (!match[1].startsWith('.')) continue;
+    const resolved = path.resolve(path.dirname(componentPath), `${match[1]}.ts`);
+    if (fs.existsSync(resolved)) result.push(normalizePath(resolved));
+  }
+  return Array.from(new Set(result));
+}
+
+function getLineNumber(text, searchText) {
+  const index = text.indexOf(searchText);
+  return index < 0 ? null : text.slice(0, index).split(/\r?\n/).length;
+}
+
+function createEntry(item) {
+  const raw = fs.readFileSync(item.path, 'utf8');
   const text = stripComments(raw);
+  const componentTs = normalizePath(item.path);
+
+  if (item.kind === 'column-service') {
+    return {
+      selector: null,
+      selectorFamily: 'created',
+      selectorPrefix: '',
+      className: readClassName(text),
+      componentTs,
+      componentFileName: path.basename(item.path),
+      entryType: 'column-service',
+    };
+  }
+
   const block = extractComponentBlock(text);
   if (!block) return null;
 
   const selector = readStringProperty(block, 'selector');
   if (!selector) return null;
-
-  const componentTs = normalizePath(file);
+  const configuredTemplate = readStringProperty(block, 'templateUrl');
+  const configuredStyles = readStringArrayProperty(block, 'styleUrls');
 
   return {
     selector,
@@ -102,7 +149,11 @@ function createEntry(file) {
     selectorPrefix: selectorPrefix(selector),
     className: readClassName(text),
     componentTs,
-    componentFileName: path.basename(file),
+    componentFileName: path.basename(item.path),
+    selectorLine: getLineNumber(raw, selector),
+    templateUrl: resolveComponentResource(item.path, configuredTemplate) || conventionalResource(item.path, '.html'),
+    styleUrls: configuredStyles.map(stylePath => resolveComponentResource(item.path, stylePath)).filter(Boolean),
+    relatedColumnServices: readImportedColumnServices(text, item.path),
   };
 }
 
@@ -155,25 +206,6 @@ function getSourceRoots() {
   ]);
 }
 
-function preferEntry(current, candidate) {
-  if (!current) return candidate;
-  const currentPath = current.componentTs || '';
-  const candidatePath = candidate.componentTs || '';
-  const currentIsMirror = currentPath.includes('/src/app/projects/');
-  const candidateIsMirror = candidatePath.includes('/src/app/projects/');
-  if (currentIsMirror !== candidateIsMirror) return candidateIsMirror ? current : candidate;
-  return candidatePath.length < currentPath.length ? candidate : current;
-}
-
-function dedupeEntries(entries) {
-  const bySelector = new Map();
-  for (const entry of entries) {
-    const key = entry.selector.toLowerCase();
-    bySelector.set(key, preferEntry(bySelector.get(key), entry));
-  }
-  return Array.from(bySelector.values());
-}
-
 function main() {
   const sourceRoots = getSourceRoots();
   if (!sourceRoots.length) {
@@ -181,10 +213,12 @@ function main() {
     process.exit(1);
   }
 
-  const entries = dedupeEntries(sourceRoots.flatMap(sourceRoot => walk(sourceRoot))
-    .map(createEntry)
-    .filter(Boolean))
-    .sort((a, b) => a.selector.localeCompare(b.selector));
+  const allItems = sourceRoots.flatMap(sourceRoot => walk(sourceRoot));
+  const componentEntries = allItems.filter(i => i.kind === 'component').map(createEntry).filter(Boolean);
+  const columnServiceEntries = allItems.filter(i => i.kind === 'column-service').map(createEntry).filter(Boolean);
+
+  const entries = [...componentEntries, ...columnServiceEntries]
+    .sort((a, b) => (a.selector || a.className || '').localeCompare(b.selector || b.className || ''));
 
   const counts = entries.reduce((acc, entry) => {
     acc[entry.selectorFamily] = (acc[entry.selectorFamily] || 0) + 1;
@@ -192,6 +226,7 @@ function main() {
   }, {});
 
   const payload = {
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     projectRoot: projectRoot.replace(/\\/g, '/'),
     sourceRoots: sourceRoots.map(sourceRoot => normalizePath(sourceRoot)),
@@ -200,7 +235,7 @@ function main() {
   };
 
   fs.writeFileSync(outFile, JSON.stringify(payload, null, 2), 'utf8');
-  console.log(`Indexed ${entries.length} components.`);
+  console.log(`Indexed ${entries.length} components (${componentEntries.length} components, ${columnServiceEntries.length} column services).`);
   console.log(`Scanned roots: ${sourceRoots.map(sourceRoot => normalizePath(sourceRoot)).join(', ')}`);
   console.log(`Created/app components: ${counts.created || 0}. Framework components: ${counts.framework || 0}. Unknown: ${counts.unknown || 0}.`);
   console.log(`Wrote ${outFile}`);

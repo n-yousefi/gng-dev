@@ -19,7 +19,7 @@
     const normalized = normalizeSelector(selector);
     if (FRAMEWORK_PREFIXES.some(prefix => normalized.startsWith(prefix))) return 'framework';
     if (CREATED_PREFIXES.some(prefix => normalized.startsWith(prefix))) return 'created';
-    return 'unknown';
+    return 'created';
   }
 
   function getSelectorPrefix(selector) {
@@ -29,7 +29,10 @@
 
   function enrichEntry(entry) {
     const componentTs = normalizePath(entry.componentTs);
-    const templateUrl = templatePathFromComponent(componentTs);
+    const hasIndexedTemplate = Object.prototype.hasOwnProperty.call(entry, 'templateUrl');
+    const templateUrl = entry.entryType === 'column-service'
+      ? ''
+      : normalizePath(hasIndexedTemplate ? entry.templateUrl : templatePathFromComponent(componentTs));
     const family = componentTs ? (entry.selectorFamily || 'created') : (entry.selectorFamily || getSelectorFamily(entry.selector));
     return {
       ...entry,
@@ -37,17 +40,27 @@
       selectorPrefix: entry.selectorPrefix || getSelectorPrefix(entry.selector),
       componentTs,
       templateUrl,
+      styleUrls: (entry.styleUrls || []).map(normalizePath),
+      relatedColumnServices: (entry.relatedColumnServices || []).map(normalizePath),
       componentFileName: entry.componentFileName || componentTs.split('/').pop() || '',
     };
   }
 
   function createIndex(entries) {
     const bySelector = new Map();
+    const columnServices = [];
     for (const entry of entries || []) {
-      if (!entry?.selector) continue;
-      bySelector.set(normalizeSelector(entry.selector), enrichEntry(entry));
+      if (entry?.entryType === 'column-service') {
+        const enriched = enrichEntry(entry);
+        columnServices.push(enriched);
+      } else if (entry?.selector) {
+        const selector = normalizeSelector(entry.selector);
+        const candidates = bySelector.get(selector) || [];
+        candidates.push(enrichEntry(entry));
+        bySelector.set(selector, candidates);
+      }
     }
-    return bySelector;
+    return { bySelector, columnServices };
   }
 
   function selectorToPossibleTemplate(selector) {
@@ -60,22 +73,72 @@
   function findSource(node, index) {
     const selector = normalizeSelector(node?.selector);
     const indexed = index?.get(selector);
-    if (indexed) {
+    const candidates = Array.isArray(indexed) ? indexed : indexed ? [indexed] : [];
+    if (candidates.length) {
+      const runtimeClassName = String(node?.componentClassName || '').trim();
+      const classMatches = runtimeClassName
+        ? candidates.filter(candidate => candidate.className === runtimeClassName)
+        : [];
+      const resolvedCandidates = classMatches.length ? classMatches : candidates;
+      if (resolvedCandidates.length === 1) {
+        const source = resolvedCandidates[0];
+        return {
+          found: Boolean(source.templateUrl || source.componentTs),
+          source,
+          candidates,
+          ambiguous: false,
+          message: classMatches.length
+            ? 'Component index matched selector and runtime class.'
+            : 'Component index found one source candidate.',
+        };
+      }
+
       return {
-        found: Boolean(indexed.templateUrl || indexed.componentTs),
-        source: indexed,
-        message: 'Component index found source paths.',
+        found: false,
+        source: {
+          selector,
+          selectorFamily: 'created',
+          className: runtimeClassName,
+          componentTs: '',
+          templateUrl: '',
+        },
+        candidates: resolvedCandidates,
+        allCandidates: candidates,
+        ambiguous: true,
+        message: `Component index found ${resolvedCandidates.length} matching source candidates.`,
       };
     }
 
-    const guessed = selectorToPossibleTemplate(selector);
     return {
       found: false,
-      source: guessed ? { templateUrl: guessed, selectorFamily: getSelectorFamily(selector) } : null,
-      message: guessed
-        ? `No source index entry found. Possible template filename: ${guessed}`
-        : 'No source index entry found.',
+      source: {
+        selector,
+        selectorFamily: getSelectorFamily(selector),
+        componentTs: '',
+        templateUrl: '',
+        possibleTemplate: selectorToPossibleTemplate(selector),
+      },
+      message: 'No source index entry found.',
     };
+  }
+
+  function findRelatedColumnServices(source, columnServices) {
+    if (!source?.componentTs) return [];
+    const componentPath = normalizePath(source.componentTs);
+    const componentDirectory = componentPath.split('/').slice(0, -1).join('/');
+    const configuredPaths = new Set((source.relatedColumnServices || []).map(normalizePath));
+    const seen = new Set();
+    const result = [];
+
+    for (const service of columnServices || []) {
+      const servicePath = normalizePath(service.componentTs);
+      const serviceDirectory = servicePath.split('/').slice(0, -1).join('/');
+      if (!configuredPaths.has(servicePath) && serviceDirectory !== componentDirectory) continue;
+      if (seen.has(servicePath)) continue;
+      seen.add(servicePath);
+      result.push(service);
+    }
+    return result.sort((left, right) => left.componentTs.localeCompare(right.componentTs));
   }
 
   function isCreatedComponent(node, index) {
@@ -109,6 +172,7 @@
 
   global.GIGSourceLoader = {
     createIndex,
+    findRelatedColumnServices,
     findSource,
     getSelectorFamily,
     isCreatedComponent,

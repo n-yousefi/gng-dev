@@ -20,6 +20,9 @@ function readEnv(filePath) {
     if (index < 0) continue;
     const key = line.slice(0, index).trim();
     const value = line.slice(index + 1).trim().replace(/^["']|["']$/g, '');
+    if (Object.prototype.hasOwnProperty.call(env, key)) {
+      throw new Error(`Duplicate .env key: ${key}. Each project must use a unique PROJECT_<ID> prefix.`);
+    }
     env[key] = value;
   }
   return env;
@@ -184,7 +187,7 @@ function buildIndex(project) {
   const index = readIndex(project.outFile);
   return {
     ok: true,
-    count: Array.isArray(index.components) ? index.components.length : 0,
+    count: Array.isArray(index.components) ? index.components.filter(entry => entry?.selector).length : 0,
     outFile: project.outFile.replace(/\\/g, '/'),
     project: projectSummary(project),
     generatedAt: index.generatedAt || new Date().toISOString(),
@@ -196,9 +199,10 @@ function buildIndex(project) {
 function getIndex(project) {
   if (!fs.existsSync(project.outFile)) return buildIndex(project);
   const index = readIndex(project.outFile);
+  if (index.schemaVersion !== 2) return buildIndex(project);
   return {
     ok: true,
-    count: Array.isArray(index.components) ? index.components.length : 0,
+    count: Array.isArray(index.components) ? index.components.filter(entry => entry?.selector).length : 0,
     outFile: project.outFile.replace(/\\/g, '/'),
     project: projectSummary(project),
     generatedAt: index.generatedAt || '',

@@ -1,6 +1,6 @@
 (function installGigComponentInspector() {
   const GLOBAL_KEY = '__gigComponentInspector';
-  const VERSION = 2;
+  const VERSION = 3;
   const DEFAULT_PREFIXES = ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
   const HIGHLIGHT_ID = '__gigComponentInspectorHighlight';
   const IVY_COMPONENT_DEFINITION_KEY = '\u0275cmp';
@@ -28,6 +28,50 @@
     if (value == null) return '';
     const text = String(value);
     return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+  }
+
+  function normalizeRuntimeTitle(value) {
+    if (typeof value !== 'string' && typeof value !== 'number') return '';
+    const title = safeString(value, 120).replace(/\s+/g, ' ').trim();
+    return title.length > 1 ? title : '';
+  }
+
+  function getRuntimeTitle(element, component, selector) {
+    const attributeNames = [
+      'aria-label',
+      'title',
+      'data-title',
+      'modal-title',
+      'dialog-title',
+      'label',
+      'placeholder',
+      'ng-reflect-modal-title',
+      'ng-reflect-dialog-title',
+      'ng-reflect-title',
+      'ng-reflect-label',
+    ];
+    for (const attributeName of attributeNames) {
+      const title = normalizeRuntimeTitle(element.getAttribute(attributeName));
+      if (title) return title;
+    }
+
+    const propertyNames = ['modalTitle', 'dialogTitle', 'title', 'label', 'header', 'caption', 'placeholder'];
+    for (const propertyName of propertyNames) {
+      try {
+        const title = normalizeRuntimeTitle(component?.[propertyName]);
+        if (title) return title;
+      } catch (_error) {}
+    }
+
+    if (!/(?:^|-)(?:modal|dialog|drawer|popup|popover)(?:-|$)/i.test(selector)) return '';
+    try {
+      const titleElement = element.querySelector(
+        '.modal-title, .dialog-title, .mat-dialog-title, .mat-mdc-dialog-title, [class*="modal-header"] h1, [class*="modal-header"] h2, [class*="dialog-header"] h1, [class*="dialog-header"] h2',
+      );
+      return normalizeRuntimeTitle(titleElement?.textContent);
+    } catch (_error) {
+      return '';
+    }
   }
 
   function normalizeSelectors(selectors) {
@@ -157,6 +201,8 @@
       const rawSelector = element.localName;
       const selector = getComponentSelector(component) || rawSelector;
       const componentClassName = getAngularClassName(component);
+      const kind = getKind(selector);
+      const runtimeTitle = kind === 'library' ? getRuntimeTitle(element, component, selector) : '';
 
       nextElements.set(id, element);
       idByElement.set(element, id);
@@ -167,8 +213,9 @@
         selector,
         rawSelector,
         displayName: componentClassName || readableNameFromSelector(selector),
+        runtimeTitle,
         componentClassName,
-        kind: getKind(selector),
+        kind,
       });
     }
 
@@ -396,6 +443,14 @@
     return { ok: true, id, selector: componentElement.localName };
   }
 
+  function selectElement(element, options = {}) {
+    if (!(element instanceof Element)) {
+      return { ok: false, message: 'Select an element in the Elements panel first.' };
+    }
+    lastContextElement = element;
+    return selectLastContextComponent(options);
+  }
+
   function destroy() {
     stopWatcher();
     clearHighlight();
@@ -413,6 +468,7 @@
     setWatching,
     getMutationState,
     inspectElementById,
+    selectElement,
     selectLastContextComponent,
     setHighlightEnabled,
     highlightElementById,

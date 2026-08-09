@@ -17,6 +17,9 @@ function Read-DotEnv([string]$Path) {
     if ($index -lt 1) { return }
     $key = $line.Substring(0, $index).Trim()
     $value = $line.Substring($index + 1).Trim().Trim('"').Trim("'")
+    if ($result.ContainsKey($key)) {
+      throw "Duplicate .env key: $key. Each project must use a unique PROJECT_<ID> prefix."
+    }
     $result[$key] = $value
   }
   return $result

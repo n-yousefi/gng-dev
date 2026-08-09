@@ -1,5 +1,6 @@
 const els = {
   refreshButton: document.getElementById("refreshButton"),
+  selectedElementButton: document.getElementById("selectedElementButton"),
   searchInput: document.getElementById("searchInput"),
   indexRefreshButton: document.getElementById("indexRefreshButton"),
   indexMeta: document.getElementById("indexMeta"),
@@ -19,13 +20,14 @@ const els = {
   detailsBadges: document.getElementById("detailsBadges"),
   tabs: Array.from(document.querySelectorAll(".tab")),
   tabPanels: Array.from(document.querySelectorAll(".tab-panel")),
+  contextMenu: document.getElementById("contextMenu"),
 };
 
 const NATIVE_HOST_NAME = "com.gng.dev_indexer";
 const LOCAL_INDEX_FILE = "component-index.json";
 const INDEX_UPDATED_STORAGE_KEY = "gigComponentInspector.indexUpdatedAt";
 const AUTO_REFRESH_DELAY_MS = 600;
-const BRIDGE_VERSION = 2;
+const BRIDGE_VERSION = 3;
 const MUTATION_POLL_INTERVAL_MS = 1000;
 const MIN_AUTO_SCAN_INTERVAL_MS = 2000;
 const SEARCH_DEBOUNCE_MS = 120;
@@ -42,6 +44,7 @@ const state = {
   scanSelectors: [],
   loadedIndexCount: 0,
   projectName: "",
+  projectId: "",
   projectRoot: "",
   ownerFilter: "all",
   collapsedIds: new Set(),
@@ -62,6 +65,7 @@ const state = {
   lastScanStartedAt: 0,
   detailsInFlight: new Map(),
   activationInFlight: null,
+  contextMenuNodeId: null,
 };
 
 init();
@@ -69,6 +73,7 @@ init();
 async function init() {
   bindEvents();
   await loadLocalIndex();
+  await loadPreferences();
   if (state.panelVisible) activatePanel();
 }
 
@@ -148,16 +153,21 @@ function bindEvents() {
   els.highlightToggle.checked = state.highlightEnabled;
   syncFilterButtons();
   els.refreshButton.addEventListener("click", () => refresh());
+  els.selectedElementButton.addEventListener("click", () => selectInspectedElement());
   els.searchInput.addEventListener("input", () => handleSearchChanged());
   els.indexRefreshButton.addEventListener("click", () => rebuildIndexWithNativeHost());
   els.clearFocusButton.addEventListener("click", () => clearTreeFocus());
-  els.highlightToggle.addEventListener("change", () => setPageHighlightEnabled(els.highlightToggle.checked));
+  els.highlightToggle.addEventListener("change", () => {
+    setPageHighlightEnabled(els.highlightToggle.checked);
+    savePreferences();
+  });
   for (const button of els.filterButtons) {
     button.addEventListener("click", () => {
       state.ownerFilter = button.dataset.filter || "all";
       syncFilterButtons();
       applyTreeFilters();
       syncSelectionWithActiveFilter();
+      savePreferences();
     });
   }
   els.detailsContent.addEventListener("click", handleDetailsClick);
@@ -165,14 +175,26 @@ function bindEvents() {
   els.treeRoot.addEventListener("dblclick", handleTreeDoubleClick);
   els.treeRoot.addEventListener("mouseover", handleTreeMouseOver);
   els.treeRoot.addEventListener("mouseout", handleTreeMouseOut);
+  els.treeRoot.addEventListener("contextmenu", handleTreeContextMenu);
+  document.addEventListener("click", hideContextMenu);
+  els.contextMenu.addEventListener("click", async (event) => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    const node = state.flatById.get(state.contextMenuNodeId);
+    hideContextMenu();
+    if (action !== "copySubTree" || !node) return;
+    await copyText(buildNodeTreeText(node));
+    setStatus(`Copied ${node.selector} subtree.`);
+  });
   chrome.runtime?.onMessage?.addListener((message) => {
     if (message?.type === "gig-context-inspect" && message.tabId === chrome.devtools.inspectedWindow.tabId) {
       getPendingContextInspect().finally(() => selectLastRightClickedComponent());
     }
   });
-  chrome.devtools?.network?.onNavigated?.addListener(() => {
+  chrome.devtools?.network?.onNavigated?.addListener(async () => {
     state.bridgeInjected = false;
     state.lastMutationVersion = null;
+    await loadLocalIndex();
+    await loadPreferences();
     scheduleRefresh(AUTO_REFRESH_DELAY_MS);
   });
   document.addEventListener("visibilitychange", () => {
@@ -198,7 +220,20 @@ function handleTreeClick(event) {
 
   const action = event.target.closest("[data-tree-action]")?.dataset.treeAction;
   if (action === "toggle") return toggleTreeNode(node.id);
-  if (action === "open") return openVsCodePath(resolveProjectPath(getNodeSource(node).componentTs));
+  if (action === "open") {
+    const source = getNodeSource(node);
+    const componentPath = resolveProjectPath(source.componentTs);
+    return source.selectorLine
+      ? openVsCodeLocation(componentPath, source.selectorLine, 1)
+      : openVsCodePath(componentPath);
+  }
+  if (action === "open-owner-template") {
+    const owner = getNearestResolvedAncestor(node.id);
+    const ownerTemplate = owner ? getNodeSource(owner).templateUrl : "";
+    if (!ownerTemplate) return setStatus("Could not resolve the owning app template.", true);
+    openVsCodePath(resolveProjectPath(ownerTemplate));
+    return setStatus("Opening the owning app template in VS Code.");
+  }
   if (action === "copy-file") {
     const fileName = getComponentFileName(getNodeSource(node));
     copyText(fileName);
@@ -216,6 +251,33 @@ function handleTreeClick(event) {
 function handleTreeDoubleClick(event) {
   const node = getTreeNodeFromEvent(event);
   if (node && !node.isVirtual) inspectNode(node.id);
+}
+
+function handleTreeContextMenu(event) {
+  const node = getTreeNodeFromEvent(event);
+  if (!node) return;
+  event.preventDefault();
+  event.stopPropagation();
+  state.contextMenuNodeId = node.id;
+  els.contextMenu.classList.remove("hidden");
+  const bounds = els.contextMenu.getBoundingClientRect();
+  const left = Math.min(event.clientX, Math.max(4, window.innerWidth - bounds.width - 4));
+  const top = Math.min(event.clientY, Math.max(4, window.innerHeight - bounds.height - 4));
+  els.contextMenu.style.left = `${left}px`;
+  els.contextMenu.style.top = `${top}px`;
+}
+
+function hideContextMenu() {
+  els.contextMenu.classList.add("hidden");
+  state.contextMenuNodeId = null;
+}
+
+function buildNodeTreeText(node, depth = 0) {
+  const source = getNodeSource(node);
+  const label = [node.selector, node.componentClassName || source.className].filter(Boolean).join(" - ");
+  const current = `${"  ".repeat(depth)}${label}`;
+  const children = (node.children || []).map(child => buildNodeTreeText(child, depth + 1));
+  return [current, ...children].join("\n");
 }
 
 function handleTreeMouseOver(event) {
@@ -269,6 +331,7 @@ function clearIndexState() {
   state.scanSelectors = [];
   state.loadedIndexCount = 0;
   state.projectName = "";
+  state.projectId = "";
   state.projectRoot = "";
   updateIndexMeta();
 }
@@ -278,6 +341,7 @@ function normalizeIndexManifest(value, project = {}) {
   const entries = Array.isArray(source) ? source : source.entries || source.components || [];
   return {
     entries,
+    projectId: project.id || source.projectId || project.name || source.projectName || "",
     projectName: project.name || source.projectName || "",
     projectRoot: Array.isArray(source) ? "" : normalizePath(source.projectRoot || project.clientAppRoot || ""),
     generatedAt: Array.isArray(source) ? "" : source.generatedAt || "",
@@ -298,18 +362,66 @@ function applyIndexManifest(value, project = {}) {
   state.columnServices = indexResult.columnServices || [];
   state.scanPrefixes = DEFAULT_SCAN_PREFIXES;
   state.scanSelectors = getScanSelectors(manifest.entries);
-  state.loadedIndexCount = manifest.entries.length;
+  state.loadedIndexCount = manifest.entries.filter(entry => entry?.selector).length;
+  state.projectId = manifest.projectId;
   state.projectName = manifest.projectName;
   state.projectRoot = manifest.projectRoot;
   state.indexUpdatedAt = manifest.generatedAt || state.indexUpdatedAt || "";
   if (state.indexUpdatedAt) localStorage.setItem(INDEX_UPDATED_STORAGE_KEY, state.indexUpdatedAt);
   updateIndexMeta();
   setIndexButtonState("ready");
-  setStatus(`Loaded ${manifest.entries.length} indexed components${manifest.projectName ? ` for ${manifest.projectName}` : ""}.`);
+  setStatus(`Loaded ${state.loadedIndexCount} indexed components${manifest.projectName ? ` for ${manifest.projectName}` : ""}.`);
   if (state.bridgeInjected) configureBridge().catch(() => {
     state.bridgeInjected = false;
   });
   return true;
+}
+
+function getPreferencesStorageKey() {
+  const identity = state.projectId || state.projectName || state.projectRoot || "default";
+  return `gigComponentInspector.preferences.${identity.toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}`;
+}
+
+async function loadPreferences() {
+  state.ownerFilter = "all";
+  state.highlightEnabled = true;
+  state.pins = new Map();
+  try {
+    const key = getPreferencesStorageKey();
+    const values = await chrome.storage.local.get(key);
+    const preferences = values[key] || {};
+    if (["all", "components", "gng"].includes(preferences.ownerFilter)) {
+      state.ownerFilter = preferences.ownerFilter;
+    }
+    if (typeof preferences.highlightEnabled === "boolean") {
+      state.highlightEnabled = preferences.highlightEnabled;
+    }
+    for (const pin of preferences.pins || []) {
+      if (pin?.key) state.pins.set(pin.key, pin);
+    }
+  } catch (_error) {
+    // Storage is a convenience; the component finder remains usable if it is unavailable.
+  }
+  els.highlightToggle.checked = state.highlightEnabled;
+  syncFilterButtons();
+  renderPins();
+  if (state.scan) applyTreeFilters();
+  if (state.bridgeInjected) setPageHighlightEnabled(state.highlightEnabled);
+}
+
+async function savePreferences() {
+  try {
+    const key = getPreferencesStorageKey();
+    await chrome.storage.local.set({
+      [key]: {
+        ownerFilter: state.ownerFilter,
+        highlightEnabled: state.highlightEnabled,
+        pins: Array.from(state.pins.values()),
+      },
+    });
+  } catch (_error) {
+    // Do not interrupt inspection for a preference-storage failure.
+  }
 }
 
 async function loadIndexFromNativeHost() {
@@ -485,8 +597,14 @@ function createScanExpression(methodName) {
 
 function getNodeKey(node) {
   if (!node) return "";
-  const source = getNodeSource(node);
-  return [node.selector, source.componentTs || source.templateUrl || node.componentClassName || node.id].join("|");
+  const sourceResult = getNodeSourceResult(node);
+  const source = sourceResult.source || {};
+  const candidatePaths = (sourceResult.candidates || [])
+    .map(candidate => candidate.componentTs || candidate.templateUrl)
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  return [node.selector, source.componentTs || source.templateUrl || candidatePaths || node.componentClassName || node.id].join("|");
 }
 
 function computeScanDiff(previousScan, currentScan) {
@@ -655,12 +773,14 @@ function renderTreeList(nodes) {
     label.innerHTML = `
       <span class="selector">${highlightText(node.selector)}</span>
       ${secondary ? `<span class="secondary">${highlightText(secondary)}</span>` : ""}
+      ${node.runtimeTitle ? `<span class="runtime-title">${highlightText(node.runtimeTitle)}</span>` : ""}
     `;
 
     const badges = document.createElement("span");
     badges.className = "badges";
     badges.appendChild(createBadge(owner === "created" ? "App" : owner === "framework" ? "GNG" : node.kind, owner));
     if (source.componentTs) badges.appendChild(createBadge("ts", "debug"));
+    if (sourceResult.ambiguous) badges.appendChild(createBadge(`${sourceResult.candidates?.length || 0} sources`, "debug"));
 
     const actions = document.createElement("span");
     actions.className = "tree-actions";
@@ -673,6 +793,19 @@ function renderTreeList(nodes) {
       openFileButton.dataset.treeAction = "open";
       openFileButton.innerHTML = iconSvg("code");
       actions.appendChild(openFileButton);
+    } else if (isMeaningfulFrameworkNode(node)) {
+      const owner = getNearestResolvedAncestor(node.id);
+      const ownerTemplate = owner ? getNodeSource(owner).templateUrl : "";
+      if (ownerTemplate) {
+        const openOwnerTemplateButton = document.createElement("button");
+        openOwnerTemplateButton.className = "icon-button icon-button-template tree-action-button";
+        openOwnerTemplateButton.type = "button";
+        openOwnerTemplateButton.title = "Open the app template that declares this framework component";
+        openOwnerTemplateButton.setAttribute("aria-label", openOwnerTemplateButton.title);
+        openOwnerTemplateButton.dataset.treeAction = "open-owner-template";
+        openOwnerTemplateButton.innerHTML = iconSvg("template");
+        actions.appendChild(openOwnerTemplateButton);
+      }
     }
     const componentFileName = getComponentFileName(source);
     if (componentFileName) {
@@ -774,7 +907,16 @@ function isIndexedComponent(node) {
   if (!node) return false;
   const sourceResult = getNodeSourceResult(node);
   const source = sourceResult.source || {};
-  return getNodeOwner(node, sourceResult) === "created" && Boolean(source.componentTs);
+  return getNodeOwner(node, sourceResult) === "created" && Boolean(source.componentTs || sourceResult.candidates?.length);
+}
+
+function getNearestResolvedAncestor(id) {
+  const ancestors = getComponentAncestors(id);
+  for (let index = ancestors.length - 2; index >= 0; index--) {
+    const source = getNodeSource(ancestors[index]);
+    if (source.componentTs) return ancestors[index];
+  }
+  return null;
 }
 
 function getNearestIndexedComponent(id) {
@@ -788,6 +930,12 @@ function getNearestIndexedComponent(id) {
 function syncSelectionWithActiveFilter() {
   if (!state.selectedId) return;
   if (state.ownerFilter === "components") {
+    const selectedNode = state.flatById.get(state.selectedId);
+    if (selectedNode && isSourceVisibleInComponents(selectedNode)) {
+      ensureTreeNodeRendered(selectedNode.id);
+      selectNode(selectedNode.id, { reveal: true, keepHighlight: true });
+      return;
+    }
     const indexedNode = getNearestIndexedComponent(state.selectedId);
     if (indexedNode) {
       ensureTreeNodeRendered(indexedNode.id);
@@ -828,6 +976,7 @@ function togglePin(id) {
   renderPins();
   renderTree(state.scan?.tree || []);
   if (state.selectedId) selectNode(state.selectedId, { reveal: false, keepHighlight: true });
+  savePreferences();
 }
 
 function renderPins() {
@@ -944,6 +1093,7 @@ function renderDetails(node) {
   els.detailsBadges.appendChild(createBadge(owner === "created" ? "App" : owner === "framework" ? "GNG/framework" : node.kind, owner));
   if (sourceInfo.className || node.componentClassName) els.detailsBadges.appendChild(createBadge(sourceInfo.className || node.componentClassName));
   if (sourceInfo.componentTs) els.detailsBadges.appendChild(createBadge("indexed", "debug"));
+  if (source.ambiguous) els.detailsBadges.appendChild(createBadge(`${source.candidates?.length || 0} source candidates`, "debug"));
   if (node.hasAngularDebugApi) els.detailsBadges.appendChild(createBadge("Angular debug", "debug"));
   if (sourceInfo.componentTs) {
     const openFileButton = document.createElement("button");
@@ -952,6 +1102,7 @@ function renderDetails(node) {
     openFileButton.title = "Open component in VS Code";
     openFileButton.setAttribute("aria-label", "Open component in VS Code");
     openFileButton.dataset.openVscode = resolveProjectPath(sourceInfo.componentTs);
+    if (sourceInfo.selectorLine) openFileButton.dataset.openLine = String(sourceInfo.selectorLine);
     openFileButton.innerHTML = iconSvg("code");
     els.detailsBadges.appendChild(openFileButton);
   }
@@ -1008,17 +1159,24 @@ function showEmptyDetails() {
 
 function renderOverview(node, sourceResult) {
   const source = sourceResult.source || {};
-  const parentComponent = source.componentTs ? null : getNearestIndexedComponent(node.id);
+  const parentComponent = source.componentTs ? null : getNearestResolvedAncestor(node.id);
+  const candidates = sourceResult.ambiguous ? sourceResult.candidates || [] : [];
+  const styles = source.styleUrls || [];
+  const relatedServices = window.GIGSourceLoader.findRelatedColumnServices(source, state.columnServices);
 
   return `
     <table class="kv">
       ${row("Selector", node.selector)}
+      ${node.runtimeTitle ? row("Runtime title", node.runtimeTitle) : ""}
       ${row("Source class", source.className || "Not indexed")}
       ${parentComponent ? parentComponentRow(parentComponent) : ""}
       ${pathRow("Component .ts", source.componentTs)}
       ${pathRow("Template .html", source.templateUrl)}
       ${row("Children", String(node.childIds?.length || 0))}
     </table>
+    ${candidates.length > 1 ? renderSourceCandidates(candidates) : ""}
+    ${styles.length ? renderRelatedPaths("Styles", styles) : ""}
+    ${relatedServices.length ? renderRelatedPaths("Related column services", relatedServices.map(service => service.componentTs)) : ""}
     <h2 class="section-title">Attributes</h2>
     ${renderObjectTable(node.attributes, "No host attributes.")}
   `;
@@ -1029,12 +1187,14 @@ function parentComponentRow(node) {
   const label = [node.selector, source.className || node.componentClassName].filter(Boolean).join(" - ");
   return `
     <tr>
-      <th>${escapeHtml("Parent component")}</th>
+      <th>${escapeHtml("Owning app component")}</th>
       <td>
         <span class="cell-value">${highlightText(label || node.selector)}</span>
         <span class="row-actions">
           ${copyButton(label || node.selector)}
+          ${iconButton("focus", "Jump to owning app component", `data-jump-node="${escapeHtml(node.id)}"`)}
           ${pathActionButtons(source.componentTs)}
+          ${pathActionButtons(source.templateUrl)}
         </span>
       </td>
     </tr>
@@ -1198,6 +1358,13 @@ async function handleDetailsClick(event) {
     return;
   }
 
+  if (target.dataset.jumpNode) {
+    makeNodeSelectableInCurrentView(target.dataset.jumpNode);
+    selectNode(target.dataset.jumpNode, { reveal: true });
+    setStatus("Opened owning app component.");
+    return;
+  }
+
   if (target.dataset.openFolder) {
     openVsCodePath(target.dataset.openFolder);
     setStatus("Opening component directory in VS Code.");
@@ -1205,7 +1372,11 @@ async function handleDetailsClick(event) {
   }
 
   if (target.dataset.openVscode) {
-    openVsCodePath(target.dataset.openVscode);
+    if (target.dataset.openLine) {
+      openVsCodeLocation(target.dataset.openVscode, Number(target.dataset.openLine), 1);
+    } else {
+      openVsCodePath(target.dataset.openVscode);
+    }
     setStatus("Opening file in VS Code.");
   }
 }
@@ -1321,15 +1492,15 @@ function applyTreeFilters() {
   const query = els.searchInput.value.trim().toLowerCase();
   const matchingIds = new Set();
   const visibleItemIds = new Set();
+  const ancestorIds = new Set();
 
   for (const node of state.flatById.values()) {
     const sourceResult = window.GIGSourceLoader.findSource(node, state.sourceIndex);
-    const source = sourceResult.source || {};
     const owner = getNodeOwner(node, sourceResult);
     const kindVisible =
       state.ownerFilter === "all" ||
       (state.ownerFilter === "app" && owner === "created") ||
-      (state.ownerFilter === "components" && owner === "created" && Boolean(source.componentTs)) ||
+      (state.ownerFilter === "components" && isSourceVisibleInComponents(node, sourceResult)) ||
       (state.ownerFilter === "gng" && owner === "framework");
     if (!kindVisible || (query && !node.searchText?.includes(query))) continue;
 
@@ -1337,7 +1508,18 @@ function applyTreeFilters() {
     let currentId = node.id;
     while (currentId) {
       visibleItemIds.add(currentId);
-      currentId = state.parentById.get(currentId);
+      const parentId = state.parentById.get(currentId);
+      if (parentId) ancestorIds.add(parentId);
+      currentId = parentId;
+    }
+  }
+
+  if (state.ownerFilter === "components") {
+    for (const id of Array.from(ancestorIds)) {
+      const ancestor = state.flatById.get(id);
+      if (!ancestor) continue;
+      const sourceResult = getNodeSourceResult(ancestor);
+      if (isIndexedComponent(ancestor) || isMeaningfulFrameworkNode(ancestor, sourceResult)) matchingIds.add(id);
     }
   }
 
@@ -1345,7 +1527,10 @@ function applyTreeFilters() {
     row.classList.toggle("hidden-by-filter", !matchingIds.has(row.dataset.id));
   }
   for (const item of els.treeRoot.querySelectorAll(".tree-item")) {
-    item.classList.toggle("hidden-by-filter", !visibleItemIds.has(item.dataset.id));
+    const id = item.dataset.id;
+    item.classList.toggle("hidden-by-filter", !visibleItemIds.has(id));
+    const forceExpanded = (Boolean(query) || state.ownerFilter !== "all") && ancestorIds.has(id);
+    item.classList.toggle("collapsed", state.collapsedIds.has(id) && !forceExpanded);
   }
 
   const totalCount = document.querySelectorAll(".tree-node").length;
@@ -1358,18 +1543,102 @@ function applyTreeFilters() {
   els.componentCount.textContent = `${matchingIds.size}/${totalCount} ${modeLabels[state.ownerFilter] || "visible"}`;
 }
 
+function isSourceVisibleInComponents(node, sourceResult = getNodeSourceResult(node)) {
+  if (isIndexedComponent(node)) return true;
+  if (!isMeaningfulFrameworkNode(node, sourceResult)) return false;
+  if (getNearestResolvedAncestor(node.id)) return true;
+  return hasIndexedDescendant(node);
+}
+
+function isMeaningfulFrameworkNode(node, sourceResult = getNodeSourceResult(node)) {
+  if (getNodeOwner(node, sourceResult) !== "framework") return false;
+  return /(?:^|-)(?:modal|dialog|drawer|popup|popover|sheet|tab-group|accordion|panel|card|grid|table|form)(?:-|$)/i.test(node.selector || "");
+}
+
+function hasIndexedDescendant(node) {
+  const pending = [...(node.children || [])];
+  while (pending.length) {
+    const current = pending.pop();
+    if (isIndexedComponent(current)) return true;
+    pending.push(...(current.children || []));
+  }
+  return false;
+}
+
+async function selectInspectedElement() {
+  try {
+    await ensureBridge();
+    const expression = `window.__gigComponentInspector.selectElement(typeof $0 === "undefined" ? null : $0)`;
+    let result = await evalInInspectedPage(expression);
+
+    if (!result?.ok && result?.needsRefresh) {
+      await refresh();
+      result = await evalInInspectedPage(expression);
+    }
+
+    if (!result?.ok) throw new Error(result?.message || "Could not find a component for the selected element.");
+    makeNodeSelectableInCurrentView(result.id);
+    selectNode(result.id, { reveal: true });
+    activateTab("overview");
+    setStatus(`Opened ${result.selector} from the selected Elements node.`);
+  } catch (error) {
+    setStatus(error.message || String(error), true);
+  }
+}
+
+function renderSourceCandidates(candidates) {
+  const uniqueCandidates = Array.from(
+    new Map(candidates.map(candidate => [candidate.componentTs || candidate.templateUrl, candidate])).values(),
+  ).filter(candidate => candidate.componentTs || candidate.templateUrl);
+  if (!uniqueCandidates.length) return "";
+  return `
+    <h2 class="section-title">Source candidates</h2>
+    <table class="kv">
+      ${uniqueCandidates.map(candidate => {
+        const candidatePath = candidate.componentTs || candidate.templateUrl;
+        return `
+          <tr>
+            <th>${highlightText(candidate.className || "Candidate")}</th>
+            <td>
+              <span class="cell-value">${highlightText(candidatePath)}</span>
+              <span class="row-actions">${copyButton(candidatePath)}${pathActionButtons(candidatePath)}</span>
+            </td>
+          </tr>
+        `;
+      }).join("")}
+    </table>
+  `;
+}
+
+function renderRelatedPaths(title, paths) {
+  const uniquePaths = Array.from(new Set(paths.filter(Boolean)));
+  if (!uniquePaths.length) return "";
+  return `
+    <h2 class="section-title">${escapeHtml(title)}</h2>
+    <table class="kv">
+      ${uniquePaths.map(path => pathRow(path.split("/").pop() || title, path)).join("")}
+    </table>
+  `;
+}
+
 function prepareNodeSearchText(node) {
   if (!node) return;
-  const source = getNodeSource(node);
+  const sourceResult = getNodeSourceResult(node);
+  const source = sourceResult.source || {};
+  const candidates = [...(sourceResult.candidates || []), ...(sourceResult.allCandidates || [])];
   node.searchText = [
     node.selector,
     node.componentClassName,
+    node.runtimeTitle,
     node.elementPath,
     source.className,
     source.componentTs,
     source.componentFileName,
     source.templateUrl,
     source.selectorFamily,
+    source.styleUrls,
+    source.relatedColumnServices,
+    candidates.map(candidate => [candidate.className, candidate.componentTs, candidate.templateUrl].filter(Boolean).join(" ")).join(" "),
     Object.entries(node.attributes || {}).map(([key, value]) => `${key}=${value}`).join(" "),
   ]
     .filter(Boolean)
@@ -1379,7 +1648,7 @@ function prepareNodeSearchText(node) {
 
 function getNodeOwner(node, sourceResult) {
   const source = sourceResult?.source || window.GIGSourceLoader.findSource(node, state.sourceIndex).source || {};
-  if (source.componentTs) return "created";
+  if (source.componentTs || sourceResult?.candidates?.length) return "created";
   const selectorFamily = source.selectorFamily || window.GIGSourceLoader.getSelectorFamily(node?.selector);
   if (selectorFamily === "created") return "created";
   if (selectorFamily === "framework") return "framework";

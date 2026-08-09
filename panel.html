@@ -9,6 +9,7 @@
   <body>
     <header class="toolbar">
       <button id="refreshButton" type="button" title="Refresh component tree">Refresh</button>
+      <button id="selectedElementButton" type="button" title="Find the component containing the selected Elements node">Find $0</button>
       <div class="segmented-filter" role="group" aria-label="Component owner filter">
         <button class="filter-button active" type="button" data-filter="all">All</button>
         <button class="filter-button" type="button" data-filter="components">Components</button>
@@ -69,6 +70,10 @@
         </div>
       </section>
     </main>
+
+    <div id="contextMenu" class="context-menu hidden">
+      <button type="button" class="context-menu-item" data-action="copySubTree">Copy Sub Tree</button>
+    </div>
 
     <script src="source-loader.js"></script>
     <script src="panel.js"></script>
