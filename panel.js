@@ -25,6 +25,10 @@ const NATIVE_HOST_NAME = "com.gng.dev_indexer";
 const LOCAL_INDEX_FILE = "component-index.json";
 const INDEX_UPDATED_STORAGE_KEY = "gigComponentInspector.indexUpdatedAt";
 const AUTO_REFRESH_DELAY_MS = 600;
+const BRIDGE_VERSION = 2;
+const MUTATION_POLL_INTERVAL_MS = 1000;
+const MIN_AUTO_SCAN_INTERVAL_MS = 2000;
+const SEARCH_DEBOUNCE_MS = 120;
 const DEFAULT_SCAN_PREFIXES = ["sl-", "gsm-", "gig-", "gng-", "app-"];
 
 const state = {
@@ -33,6 +37,7 @@ const state = {
   flatById: new Map(),
   selectedId: null,
   sourceIndex: new Map(),
+  columnServices: [],
   scanPrefixes: DEFAULT_SCAN_PREFIXES,
   scanSelectors: [],
   loadedIndexCount: 0,
@@ -50,6 +55,13 @@ const state = {
   refreshInFlight: false,
   refreshQueued: false,
   autoRefreshTimeoutId: null,
+  mutationPollTimeoutId: null,
+  searchTimeoutId: null,
+  panelVisible: !document.hidden,
+  lastMutationVersion: null,
+  lastScanStartedAt: 0,
+  detailsInFlight: new Map(),
+  activationInFlight: null,
 };
 
 init();
@@ -57,18 +69,82 @@ init();
 async function init() {
   bindEvents();
   await loadLocalIndex();
+  if (state.panelVisible) activatePanel();
+}
+
+async function activatePanel() {
+  state.panelVisible = true;
+  if (state.activationInFlight) return state.activationInFlight;
+
+  state.activationInFlight = (async () => {
+    try {
+      await ensureBridge();
+      if (!state.panelVisible) return;
+      await evalInInspectedPage("window.__gigComponentInspector.setWatching(true)");
+      if (!state.panelVisible) return;
+      startMutationPoller();
+      const pending = await getPendingContextInspect();
+      if (pending) selectLastRightClickedComponent();
+      else if (!state.scan) refresh();
+      else scheduleRefresh(150);
+    } catch (_error) {
+      state.bridgeInjected = false;
+    } finally {
+      state.activationInFlight = null;
+    }
+  })();
+
+  return state.activationInFlight;
+}
+
+async function deactivatePanel() {
+  state.panelVisible = false;
+  clearTimeout(state.mutationPollTimeoutId);
+  clearTimeout(state.autoRefreshTimeoutId);
+  state.mutationPollTimeoutId = null;
+  state.autoRefreshTimeoutId = null;
+  try {
+    await evalInInspectedPage("window.__gigComponentInspector?.setWatching(false)");
+  } catch (_error) {}
+}
+
+function startMutationPoller() {
+  clearTimeout(state.mutationPollTimeoutId);
+  state.mutationPollTimeoutId = setTimeout(pollMutationState, MUTATION_POLL_INTERVAL_MS);
+}
+
+async function pollMutationState() {
+  if (!state.panelVisible || state.refreshInFlight) {
+    if (state.panelVisible) startMutationPoller();
+    return;
+  }
 
   try {
-    await ensureBridge();
-    const pending = await getPendingContextInspect();
-    if (pending) selectLastRightClickedComponent();
-    else refresh();
+    const mutationState = await evalInInspectedPage("window.__gigComponentInspector?.getMutationState()");
+    if (!mutationState?.watching) {
+      await evalInInspectedPage("window.__gigComponentInspector?.setWatching(true)");
+    }
+    if (state.lastMutationVersion == null) {
+      state.lastMutationVersion = mutationState?.mutationVersion ?? 0;
+    } else if ((mutationState?.mutationVersion ?? state.lastMutationVersion) !== state.lastMutationVersion) {
+      state.lastMutationVersion = mutationState.mutationVersion;
+      const elapsed = performance.now() - state.lastScanStartedAt;
+      scheduleRefresh(Math.max(150, MIN_AUTO_SCAN_INTERVAL_MS - elapsed));
+    }
   } catch (_error) {
     state.bridgeInjected = false;
+  } finally {
+    if (state.panelVisible) startMutationPoller();
   }
 }
 
 function bindEvents() {
+  window.addEventListener("message", event => {
+    if (event.source !== window || event.data?.type !== "gig-panel-visibility") return;
+    if (event.data.visible) activatePanel();
+    else deactivatePanel();
+  });
+  window.addEventListener("unload", () => deactivatePanel());
   els.highlightToggle.checked = state.highlightEnabled;
   syncFilterButtons();
   els.refreshButton.addEventListener("click", () => refresh());
@@ -85,16 +161,23 @@ function bindEvents() {
     });
   }
   els.detailsContent.addEventListener("click", handleDetailsClick);
+  els.treeRoot.addEventListener("click", handleTreeClick);
+  els.treeRoot.addEventListener("dblclick", handleTreeDoubleClick);
+  els.treeRoot.addEventListener("mouseover", handleTreeMouseOver);
+  els.treeRoot.addEventListener("mouseout", handleTreeMouseOut);
   chrome.runtime?.onMessage?.addListener((message) => {
     if (message?.type === "gig-context-inspect" && message.tabId === chrome.devtools.inspectedWindow.tabId) {
       getPendingContextInspect().finally(() => selectLastRightClickedComponent());
     }
   });
   chrome.devtools?.network?.onNavigated?.addListener(() => {
+    state.bridgeInjected = false;
+    state.lastMutationVersion = null;
     scheduleRefresh(AUTO_REFRESH_DELAY_MS);
   });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) scheduleRefresh(300);
+    if (document.hidden) deactivatePanel();
+    else activatePanel();
   });
 
   for (const tab of els.tabs) {
@@ -102,14 +185,56 @@ function bindEvents() {
   }
 }
 
-function handleSearchChanged() {
-  if (state.scan) {
-    const selectedId = state.selectedId;
-    renderTree(state.scan.tree);
-    if (selectedId) selectNode(selectedId, { reveal: false, keepHighlight: true });
-  } else {
-    applyTreeFilters();
+function getTreeNodeFromEvent(event) {
+  const row = event.target.closest(".tree-node");
+  if (!row || !els.treeRoot.contains(row)) return null;
+  return state.flatById.get(row.dataset.id) || null;
+}
+
+function handleTreeClick(event) {
+  const node = getTreeNodeFromEvent(event);
+  if (!node) return;
+  event.stopPropagation();
+
+  const action = event.target.closest("[data-tree-action]")?.dataset.treeAction;
+  if (action === "toggle") return toggleTreeNode(node.id);
+  if (action === "open") return openVsCodePath(resolveProjectPath(getNodeSource(node).componentTs));
+  if (action === "copy-file") {
+    const fileName = getComponentFileName(getNodeSource(node));
+    copyText(fileName);
+    return setStatus(`Copied ${fileName}.`);
   }
+  if (action === "copy-path") {
+    copyText(getComponentPath(node.id));
+    return setStatus("Copied component path.");
+  }
+  if (action === "pin") return togglePin(node.id);
+  if (action === "focus") return focusTreeOn(node.id);
+  selectNode(node.id, { keepHighlight: node.isVirtual });
+}
+
+function handleTreeDoubleClick(event) {
+  const node = getTreeNodeFromEvent(event);
+  if (node && !node.isVirtual) inspectNode(node.id);
+}
+
+function handleTreeMouseOver(event) {
+  const row = event.target.closest(".tree-node");
+  if (!row || row.contains(event.relatedTarget)) return;
+  const node = state.flatById.get(row.dataset.id);
+  if (node && !node.isVirtual) highlightNodeOnPage(node.id, { durationMs: 0 });
+}
+
+function handleTreeMouseOut(event) {
+  const row = event.target.closest(".tree-node");
+  if (!row || row.contains(event.relatedTarget)) return;
+  const node = state.flatById.get(row.dataset.id);
+  if (node && !node.isVirtual) clearPageHighlight();
+}
+
+function handleSearchChanged() {
+  clearTimeout(state.searchTimeoutId);
+  state.searchTimeoutId = setTimeout(applyTreeFilters, SEARCH_DEBOUNCE_MS);
 }
 
 function syncFilterButtons() {
@@ -139,6 +264,7 @@ async function loadLocalIndex() {
 
 function clearIndexState() {
   state.sourceIndex = new Map();
+  state.columnServices = [];
   state.scanPrefixes = DEFAULT_SCAN_PREFIXES;
   state.scanSelectors = [];
   state.loadedIndexCount = 0;
@@ -167,7 +293,9 @@ function applyIndexManifest(value, project = {}) {
     return false;
   }
 
-  state.sourceIndex = window.GIGSourceLoader.createIndex(manifest.entries);
+  const indexResult = window.GIGSourceLoader.createIndex(manifest.entries);
+  state.sourceIndex = indexResult instanceof Map ? indexResult : indexResult.bySelector;
+  state.columnServices = indexResult.columnServices || [];
   state.scanPrefixes = DEFAULT_SCAN_PREFIXES;
   state.scanSelectors = getScanSelectors(manifest.entries);
   state.loadedIndexCount = manifest.entries.length;
@@ -178,6 +306,9 @@ function applyIndexManifest(value, project = {}) {
   updateIndexMeta();
   setIndexButtonState("ready");
   setStatus(`Loaded ${manifest.entries.length} indexed components${manifest.projectName ? ` for ${manifest.projectName}` : ""}.`);
+  if (state.bridgeInjected) configureBridge().catch(() => {
+    state.bridgeInjected = false;
+  });
   return true;
 }
 
@@ -302,12 +433,37 @@ async function clearPageHighlight() {
   }
 }
 
-function buildParentMap(nodes, parentId = null, map = new Map()) {
-  for (const node of nodes || []) {
-    map.set(node.id, parentId);
-    buildParentMap(node.children || [], node.id, map);
+function buildTreeFromFlat(flatNodes) {
+  const nodesById = new Map();
+  const roots = [];
+
+  for (const rawNode of flatNodes || []) {
+    const previous = state.flatById.get(rawNode.id);
+    const node = {
+      ...rawNode,
+      attributes: previous?.detailsLoaded ? previous.attributes : {},
+      classes: previous?.detailsLoaded ? previous.classes : [],
+      elementPath: previous?.detailsLoaded ? previous.elementPath : "",
+      domPreview: previous?.detailsLoaded ? previous.domPreview : "",
+      hasAngularDebugApi: previous?.detailsLoaded ? previous.hasAngularDebugApi : false,
+      detailsLoaded: Boolean(previous?.detailsLoaded),
+      childIds: [],
+      children: [],
+    };
+    nodesById.set(node.id, node);
   }
-  return map;
+
+  for (const node of nodesById.values()) {
+    const parent = node.parentId ? nodesById.get(node.parentId) : null;
+    if (parent) {
+      parent.childIds.push(node.id);
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  return { roots, nodesById };
 }
 
 function getNodeSource(node) {
@@ -324,19 +480,19 @@ function getScanSelectors(entries = []) {
 }
 
 function createScanExpression(methodName) {
-  return `window.__gigComponentInspector.${methodName}(${JSON.stringify({ prefixes: state.scanPrefixes, selectors: state.scanSelectors })})`;
+  return `window.__gigComponentInspector.${methodName}()`;
 }
 
 function getNodeKey(node) {
   if (!node) return "";
   const source = getNodeSource(node);
-  return [node.selector, source.componentTs || source.templateUrl || node.elementPath].join("|");
+  return [node.selector, source.componentTs || source.templateUrl || node.componentClassName || node.id].join("|");
 }
 
 function computeScanDiff(previousScan, currentScan) {
   if (!previousScan?.flatNodes?.length) return null;
-  const previousByKey = new Map(previousScan.flatNodes.map((node) => [getNodeKey(node), node]));
-  const currentByKey = new Map(currentScan.flatNodes.map((node) => [getNodeKey(node), node]));
+  const previousByKey = new Map(previousScan.flatNodes.filter(node => !node.isVirtual).map((node) => [node.id, node]));
+  const currentByKey = new Map(currentScan.flatNodes.filter(node => !node.isVirtual).map((node) => [node.id, node]));
   const added = [];
   const removed = [];
 
@@ -356,6 +512,7 @@ async function refresh() {
     return;
   }
   state.refreshInFlight = true;
+  state.lastScanStartedAt = performance.now();
   try {
     state.refreshQueued = false;
     setStatus("Injecting bridge...");
@@ -366,24 +523,28 @@ async function refresh() {
       throw new Error(result?.message || "Scan failed.");
     }
     const previousScan = state.scan;
-    state.scan = result;
-    state.flatById = new Map(result.flatNodes.map((node) => [node.id, node]));
-    state.parentById = buildParentMap(result.tree);
+    const previousSelection = state.selectedId;
+    const tree = buildTreeFromFlat(result.flatNodes);
+    state.scan = { ...result, tree: tree.roots };
+    state.flatById = tree.nodesById;
     state.scanDiff = computeScanDiff(previousScan, result);
-    state.selectedId = null;
-    state.collapsedIds.clear();
-    state.focusRootId = null;
-    renderTree(result.tree);
+    for (const node of state.flatById.values()) prepareNodeSearchText(node);
+    state.parentById = new Map(Array.from(state.flatById.values(), node => [node.id, node.parentId || null]));
+    state.lastMutationVersion = result.mutationVersion ?? state.lastMutationVersion ?? 0;
+    state.selectedId = previousSelection && state.flatById.has(previousSelection) ? previousSelection : null;
+    if (state.focusRootId && !state.flatById.has(state.focusRootId)) state.focusRootId = null;
+    renderTree(state.scan.tree);
     renderPins();
-    showEmptyDetails();
-    state.scanSummary = `Found ${result.count} components${result.angularDebugApi ? " with Angular debug API" : ""}`;
+    if (state.selectedId) selectNode(state.selectedId, { reveal: false, keepHighlight: true });
+    else showEmptyDetails();
+    state.scanSummary = `Found ${result.count} components in ${result.scanMs ?? "?"} ms${result.angularDebugApi ? " with Angular debug API" : ""}`;
     updateIndexMeta();
     setStatus(`${state.scanSummary}.`);
   } catch (error) {
     setStatus(error.message || String(error), true);
   } finally {
     state.refreshInFlight = false;
-    if (state.refreshQueued && !document.hidden) {
+    if (state.refreshQueued && state.panelVisible) {
       refresh();
     }
   }
@@ -392,23 +553,26 @@ async function refresh() {
 function scheduleRefresh(delay = AUTO_REFRESH_DELAY_MS) {
   clearTimeout(state.autoRefreshTimeoutId);
   state.autoRefreshTimeoutId = setTimeout(() => {
-    if (!document.hidden) refresh();
+    if (state.panelVisible) refresh();
   }, delay);
 }
 
 async function ensureBridge() {
-  if (state.bridgeInjected) {
-    const existing = await evalInInspectedPage("Boolean(window.__gigComponentInspector?.scan)");
-    if (existing) return;
-    state.bridgeInjected = false;
-  }
+  const existingVersion = await evalInInspectedPage("window.__gigComponentInspector?.version || 0").catch(() => 0);
+  if (state.bridgeInjected && existingVersion === BRIDGE_VERSION) return;
   const bridgeUrl = chrome.runtime.getURL("inspected-bridge.js");
   const bridgeCode = await fetch(bridgeUrl).then((response) => response.text());
   await evalInInspectedPage(bridgeCode);
   state.bridgeInjected = true;
+  await configureBridge();
   if (state.highlightEnabled) {
     await evalInInspectedPage("window.__gigComponentInspector.setHighlightEnabled(true)");
   }
+}
+
+function configureBridge() {
+  const options = { prefixes: state.scanPrefixes, selectors: state.scanSelectors };
+  return evalInInspectedPage(`window.__gigComponentInspector.configure(${JSON.stringify(options)})`);
 }
 
 function evalInInspectedPage(expression) {
@@ -482,11 +646,8 @@ function renderTreeList(nodes) {
     arrow.type = "button";
     arrow.title = node.children?.length ? "Collapse or expand children" : "";
     arrow.disabled = !node.children?.length;
+    arrow.dataset.treeAction = "toggle";
     arrow.innerHTML = node.children?.length ? iconSvg("chevron") : "";
-    arrow.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toggleTreeNode(node.id);
-    });
 
     const label = document.createElement("span");
     label.className = "tree-label";
@@ -509,11 +670,8 @@ function renderTreeList(nodes) {
       openFileButton.type = "button";
       openFileButton.title = "Open component in VS Code";
       openFileButton.setAttribute("aria-label", "Open component in VS Code");
+      openFileButton.dataset.treeAction = "open";
       openFileButton.innerHTML = iconSvg("code");
-      openFileButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        openVsCodePath(resolveProjectPath(source.componentTs));
-      });
       actions.appendChild(openFileButton);
     }
     const componentFileName = getComponentFileName(source);
@@ -523,12 +681,8 @@ function renderTreeList(nodes) {
       copyFileNameButton.type = "button";
       copyFileNameButton.title = "Copy component .ts filename";
       copyFileNameButton.setAttribute("aria-label", "Copy component .ts filename");
+      copyFileNameButton.dataset.treeAction = "copy-file";
       copyFileNameButton.innerHTML = iconSvg("copy");
-      copyFileNameButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        copyText(componentFileName);
-        setStatus(`Copied ${componentFileName}.`);
-      });
       actions.appendChild(copyFileNameButton);
     }
     const copyPathButton = document.createElement("button");
@@ -536,12 +690,8 @@ function renderTreeList(nodes) {
     copyPathButton.type = "button";
     copyPathButton.title = "Copy component path";
     copyPathButton.setAttribute("aria-label", "Copy component path");
+    copyPathButton.dataset.treeAction = "copy-path";
     copyPathButton.innerHTML = iconSvg("path");
-    copyPathButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      copyText(getComponentPath(node.id));
-      setStatus("Copied component path.");
-    });
     actions.appendChild(copyPathButton);
 
     const pinButton = document.createElement("button");
@@ -549,11 +699,8 @@ function renderTreeList(nodes) {
     pinButton.type = "button";
     pinButton.title = "Pin component";
     pinButton.setAttribute("aria-label", "Pin component");
+    pinButton.dataset.treeAction = "pin";
     pinButton.innerHTML = iconSvg(isPinned(node) ? "pinFilled" : "pin");
-    pinButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      togglePin(node.id);
-    });
     actions.appendChild(pinButton);
 
     const focusButton = document.createElement("button");
@@ -561,24 +708,11 @@ function renderTreeList(nodes) {
     focusButton.type = "button";
     focusButton.title = "Focus this component and children";
     focusButton.setAttribute("aria-label", "Focus this component and children");
+    focusButton.dataset.treeAction = "focus";
     focusButton.innerHTML = iconSvg("focus");
-    focusButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      focusTreeOn(node.id);
-    });
     actions.appendChild(focusButton);
 
     row.append(arrow, label, actions, badges);
-    row.addEventListener("click", (event) => {
-      event.stopPropagation();
-      selectNode(node.id);
-    });
-    row.addEventListener("dblclick", (event) => {
-      event.stopPropagation();
-      inspectNode(node.id);
-    });
-    row.addEventListener("mouseenter", () => highlightNodeOnPage(node.id, { durationMs: 0 }));
-    row.addEventListener("mouseleave", () => clearPageHighlight());
 
     item.appendChild(row);
     if (node.children?.length) item.appendChild(renderTreeList(node.children));
@@ -735,8 +869,37 @@ function selectNode(id, options = {}) {
   const row = document.querySelector(`.tree-node[data-id="${cssEscape(id)}"]`);
   row?.classList.add("selected");
   if (options.reveal) revealTreeNode(row);
-  renderDetails(state.flatById.get(id));
+  const node = state.flatById.get(id);
+  renderDetails(node);
+  if (node && !node.isVirtual && !node.detailsLoaded) loadNodeDetails(node);
   if (!options.keepHighlight) highlightNodeOnPage(id);
+}
+
+async function loadNodeDetails(node) {
+  if (!node?.id || node.detailsLoaded) return;
+  if (state.detailsInFlight.has(node.id)) return state.detailsInFlight.get(node.id);
+
+  const request = (async () => {
+    try {
+      await ensureBridge();
+      const result = await evalInInspectedPage(
+        `window.__gigComponentInspector.getNodeDetails(${JSON.stringify(node.id)})`,
+      );
+      if (!result?.ok) return;
+      const current = state.flatById.get(node.id);
+      if (!current) return;
+      Object.assign(current, result, { detailsLoaded: true });
+      prepareNodeSearchText(current);
+      if (state.selectedId === current.id) renderDetails(current);
+    } catch (_error) {
+      // Details are optional; the source mapping and component tree stay usable.
+    } finally {
+      state.detailsInFlight.delete(node.id);
+    }
+  })();
+
+  state.detailsInFlight.set(node.id, request);
+  return request;
 }
 
 function revealTreeNode(row) {
@@ -1156,12 +1319,10 @@ function activateTab(name) {
 
 function applyTreeFilters() {
   const query = els.searchInput.value.trim().toLowerCase();
-  let visibleCount = 0;
+  const matchingIds = new Set();
+  const visibleItemIds = new Set();
 
-  document.querySelectorAll(".tree-node").forEach((row) => {
-    const id = row.dataset.id;
-    const node = state.flatById.get(id);
-    if (!node) return;
+  for (const node of state.flatById.values()) {
     const sourceResult = window.GIGSourceLoader.findSource(node, state.sourceIndex);
     const source = sourceResult.source || {};
     const owner = getNodeOwner(node, sourceResult);
@@ -1170,33 +1331,22 @@ function applyTreeFilters() {
       (state.ownerFilter === "app" && owner === "created") ||
       (state.ownerFilter === "components" && owner === "created" && Boolean(source.componentTs)) ||
       (state.ownerFilter === "gng" && owner === "framework");
-    const haystack = [
-      node.selector,
-      node.componentClassName,
-      node.elementPath,
-      source.className,
-      source.componentTs,
-      source.componentFileName,
-      source.templateUrl,
-      source.selectorFamily,
-      Object.entries(node.attributes || {})
-        .map(([key, value]) => `${key}=${value}`)
-        .join(" "),
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    const searchVisible = !query || haystack.includes(query);
-    const visible = kindVisible && searchVisible;
-    row.classList.toggle("hidden-by-filter", !visible);
-    if (visible) visibleCount++;
-  });
+    if (!kindVisible || (query && !node.searchText?.includes(query))) continue;
 
-  document.querySelectorAll(".tree-item").forEach((item) => {
-    const ownRowVisible = !item.querySelector(":scope > .tree-node")?.classList.contains("hidden-by-filter");
-    const childVisible = Boolean(item.querySelector(":scope > .tree-list .tree-node:not(.hidden-by-filter)"));
-    item.classList.toggle("hidden-by-filter", !ownRowVisible && !childVisible);
-  });
+    matchingIds.add(node.id);
+    let currentId = node.id;
+    while (currentId) {
+      visibleItemIds.add(currentId);
+      currentId = state.parentById.get(currentId);
+    }
+  }
+
+  for (const row of els.treeRoot.querySelectorAll(".tree-node")) {
+    row.classList.toggle("hidden-by-filter", !matchingIds.has(row.dataset.id));
+  }
+  for (const item of els.treeRoot.querySelectorAll(".tree-item")) {
+    item.classList.toggle("hidden-by-filter", !visibleItemIds.has(item.dataset.id));
+  }
 
   const totalCount = document.querySelectorAll(".tree-node").length;
   const modeLabels = {
@@ -1205,7 +1355,26 @@ function applyTreeFilters() {
     components: "Components",
     gng: "gng",
   };
-  els.componentCount.textContent = `${visibleCount}/${totalCount} ${modeLabels[state.ownerFilter] || "visible"}`;
+  els.componentCount.textContent = `${matchingIds.size}/${totalCount} ${modeLabels[state.ownerFilter] || "visible"}`;
+}
+
+function prepareNodeSearchText(node) {
+  if (!node) return;
+  const source = getNodeSource(node);
+  node.searchText = [
+    node.selector,
+    node.componentClassName,
+    node.elementPath,
+    source.className,
+    source.componentTs,
+    source.componentFileName,
+    source.templateUrl,
+    source.selectorFamily,
+    Object.entries(node.attributes || {}).map(([key, value]) => `${key}=${value}`).join(" "),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 }
 
 function getNodeOwner(node, sourceResult) {

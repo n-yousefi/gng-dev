@@ -1,9 +1,28 @@
 (function installGigComponentInspector() {
   const GLOBAL_KEY = '__gigComponentInspector';
-  const VERSION = 1;
+  const VERSION = 2;
   const DEFAULT_PREFIXES = ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
   const HIGHLIGHT_ID = '__gigComponentInspectorHighlight';
   const IVY_COMPONENT_DEFINITION_KEY = '\u0275cmp';
+  const WATCH_LEASE_MS = 4000;
+
+  const existing = window[GLOBAL_KEY];
+  if (existing?.version === VERSION) return existing;
+  try {
+    existing?.destroy?.();
+  } catch (_error) {}
+
+  let scanPrefixes = DEFAULT_PREFIXES;
+  let scanSelectors = new Set();
+  let elements = new Map();
+  let elementIds = new WeakMap();
+  let nextElementId = 1;
+  let mutationVersion = 0;
+  let observer = null;
+  let watcherLeaseTimer = null;
+  let lastContextElement = null;
+  let highlightEnabled = false;
+  let highlightTimer = null;
 
   function safeString(value, maxLength = 300) {
     if (value == null) return '';
@@ -11,54 +30,25 @@
     return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
   }
 
-  function getAttributes(element) {
-    const result = {};
-    for (const attr of Array.from(element.attributes || [])) {
-      result[attr.name] = attr.value;
-    }
-    return result;
+  function normalizeSelectors(selectors) {
+    if (!Array.isArray(selectors)) return new Set();
+    return new Set(
+      selectors
+        .map(selector => String(selector || '').trim().toLowerCase())
+        .filter(Boolean),
+    );
   }
 
-  function getElementPath(element) {
-    const parts = [];
-    let current = element;
-    while (current && current.nodeType === Node.ELEMENT_NODE) {
-      const tag = current.tagName.toLowerCase();
-      let part = tag;
-      if (current.id) {
-        part += `#${current.id}`;
-      } else {
-        let sameTagCount = 0;
-        let sameTagIndex = 0;
-        for (const sibling of current.parentElement?.children || []) {
-          if (sibling.tagName !== current.tagName) continue;
-          sameTagCount++;
-          if (sibling === current) sameTagIndex = sameTagCount;
-        }
-        if (sameTagCount > 1) {
-          part += `:nth-of-type(${sameTagIndex})`;
-        }
-      }
-      parts.unshift(part);
-      current = current.parentElement;
-      if (tag === 'html') break;
-    }
-    return parts.join(' > ');
-  }
-
-  function getDomPreview(element) {
-    const clone = element.cloneNode(false);
-    const attrs = Array.from(clone.attributes || [])
-      .map(attr => `${attr.name}="${safeString(attr.value, 120).replace(/"/g, '&quot;')}"`)
-      .join(' ');
-    const tag = clone.tagName.toLowerCase();
-    return attrs ? `<${tag} ${attrs}>...</${tag}>` : `<${tag}>...</${tag}>`;
-  }
-
-  function getKind(selector) {
-    if (selector.startsWith('gig-') || selector.startsWith('gng-') || selector.startsWith('gsm-')) return 'library';
-    if (selector.startsWith('sl-') || selector.startsWith('app-')) return 'app';
-    return 'unknown';
+  function configure(options = {}) {
+    scanPrefixes = Array.isArray(options.prefixes) && options.prefixes.length
+      ? options.prefixes.map(prefix => String(prefix).toLowerCase())
+      : DEFAULT_PREFIXES;
+    scanSelectors = normalizeSelectors(options.selectors);
+    return {
+      ok: true,
+      prefixes: scanPrefixes.length,
+      selectors: scanSelectors.size,
+    };
   }
 
   function getOwnAngularComponent(element) {
@@ -76,291 +66,246 @@
   function getComponentSelector(component) {
     const selectors = getAngularDefinition(component)?.selectors;
     if (!Array.isArray(selectors)) return null;
-
     for (const selectorGroup of selectors) {
       if (!Array.isArray(selectorGroup)) continue;
-      const selector = selectorGroup.find(part => typeof part === 'string' && part && /^[a-z][a-z0-9-]*$/i.test(part));
+      const selector = selectorGroup.find(part => typeof part === 'string' && /^[a-z][a-z0-9-]*$/i.test(part));
       if (selector) return selector.toLowerCase();
     }
-
     return null;
   }
 
-  function getAngularMetadata(element) {
-    const ownComponent = getOwnAngularComponent(element);
-    const metadata = {
-      hasAngularDebugApi: Boolean(window.ng),
-      isComponentHost: Boolean(ownComponent),
-      componentSelector: getComponentSelector(ownComponent),
-      componentClassName: null,
-      directiveNames: [],
-      inputs: [],
-      outputs: [],
-      componentInstanceSummary: {},
-      componentProperties: {},
-    };
+  function getAngularClassName(component) {
+    const directName = component?.constructor?.name;
+    if (directName && directName.length > 1) return directName;
+    const definitionName = getAngularDefinition(component)?.type?.name;
+    return definitionName && definitionName.length > 1 ? definitionName : null;
+  }
 
-    try {
-      const component = ownComponent || window.ng?.getOwningComponent?.(element);
-      if (component) {
-        metadata.componentSelector ||= getComponentSelector(component);
-        metadata.componentClassName = component.constructor?.name || null;
-        const ioMetadata = getComponentIoMetadata(component);
-        metadata.inputs = ioMetadata.inputs;
-        metadata.outputs = ioMetadata.outputs;
-        metadata.componentInstanceSummary = summarizeInstance(component);
-        metadata.componentProperties = summarizeProperties(component);
-      }
-    } catch (error) {
-      metadata.componentError = safeString(error?.message || error);
+  function readableNameFromSelector(selector) {
+    if (!selector || !selector.includes('-')) return selector || '';
+    const parts = selector.split('-').filter(Boolean);
+    const prefixes = new Set(['sl', 'app', 'gig', 'gng', 'gsm']);
+    const startIndex = prefixes.has(parts[0]) ? 1 : 0;
+    return parts.slice(startIndex).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('');
+  }
+
+  function getKind(selector) {
+    if (/^(gig|gng|gsm)-/.test(selector)) return 'library';
+    return 'app';
+  }
+
+  function isConfiguredComponentTag(element) {
+    if (!(element instanceof Element)) return false;
+    const tag = element.localName;
+    if (!tag || !tag.includes('-')) return false;
+    return scanSelectors.has(tag) || scanPrefixes.some(prefix => tag.startsWith(prefix));
+  }
+
+  function getOrCreateElementId(element) {
+    let id = elementIds.get(element);
+    if (!id) {
+      id = `cmp-${nextElementId++}`;
+      elementIds.set(element, id);
+    }
+    return id;
+  }
+
+  function findParentId(element, idByElement, componentToElement, ownId) {
+    let parent = element.parentElement;
+    while (parent) {
+      const parentId = idByElement.get(parent);
+      if (parentId) return parentId;
+      parent = parent.parentElement;
     }
 
     try {
-      const directives = window.ng?.getDirectives?.(element);
-      if (Array.isArray(directives)) {
-        metadata.directiveNames = directives
-          .map(directive => directive?.constructor?.name)
-          .filter(Boolean)
-          .slice(0, 20);
-      }
-    } catch (error) {
-      metadata.directiveError = safeString(error?.message || error);
+      const owningComponent = window.ng?.getOwningComponent?.(element);
+      const owningElement = owningComponent ? componentToElement.get(owningComponent) : null;
+      const owningId = owningElement ? idByElement.get(owningElement) : null;
+      return owningId && owningId !== ownId ? owningId : null;
+    } catch (_error) {
+      return null;
     }
-
-    return metadata;
   }
 
-  function getComponentIoMetadata(component) {
-    const definition = getAngularDefinition(component);
-    return {
-      inputs: normalizeIoDefinition(definition?.inputs),
-      outputs: normalizeIoDefinition(definition?.outputs),
-    };
-  }
-
-  function normalizeIoDefinition(definition) {
-    if (!definition || typeof definition !== 'object') return [];
-    return Object.entries(definition)
-      .map(([publicName, value]) => {
-        if (Array.isArray(value)) {
-          return {
-            publicName,
-            propertyName: value[0] || publicName,
-            declaredName: value[1] || '',
-          };
-        }
-        return {
-          publicName,
-          propertyName: typeof value === 'string' ? value : publicName,
-          declaredName: '',
-        };
-      })
-      .sort((a, b) => a.publicName.localeCompare(b.publicName));
-  }
-
-  function summarizeProperties(instance) {
-    const result = {};
-    const seen = new Set();
-    let current = instance;
-    let depth = 0;
-
-    while (current && current !== Object.prototype && depth < 3) {
-      for (const key of Object.getOwnPropertyNames(current).slice(0, 160)) {
-        if (seen.has(key) || key === 'constructor' || key.startsWith('_')) continue;
-        seen.add(key);
-
-        const descriptor = Object.getOwnPropertyDescriptor(current, key);
-        if (!descriptor || typeof descriptor.value === 'function') continue;
-
-        try {
-          const value = descriptor.get ? instance[key] : descriptor.value;
-          const summary = summarizeValue(value, 0);
-          if (summary !== undefined) {
-            result[key] = {
-              source: current === instance ? 'instance' : 'prototype',
-              value: summary,
-            };
-          }
-        } catch (error) {
-          result[key] = {
-            source: current === instance ? 'instance' : 'prototype',
-            error: safeString(error?.message || error),
-          };
-        }
-      }
-
-      current = Object.getPrototypeOf(current);
-      depth++;
-    }
-
-    return result;
-  }
-
-  function summarizeInstance(instance) {
-    const output = {};
-    const keys = Object.keys(instance || {}).slice(0, 120);
-    for (const key of keys) {
-      if (key.startsWith('_') || key.includes('subscription') || key.includes('Subscription')) continue;
-      const value = instance[key];
-      const summary = summarizeValue(value, 0);
-      if (summary !== undefined) output[key] = summary;
-    }
-    return output;
-  }
-
-  function summarizeValue(value, depth) {
-    if (value == null) return value;
-    const type = typeof value;
-    if (type === 'string') return safeString(value, 300);
-    if (type === 'number' || type === 'boolean') return value;
-    if (type === 'function' || type === 'symbol') return undefined;
-    if (value instanceof Node || value instanceof Window || value instanceof Document) return undefined;
-    if (Array.isArray(value)) {
-      return {
-        type: 'Array',
-        length: value.length,
-        preview: value.slice(0, 5).map(item => summarizeValue(item, depth + 1)).filter(item => item !== undefined),
-      };
-    }
-    if (type === 'object') {
-      const ctor = value.constructor?.name;
-      if (/Subject|Observable|Subscription|Service|Manager|Ref|Injector|Router/i.test(ctor || '')) {
-        return { type: ctor || 'Object' };
-      }
-      if (depth > 0) return { type: ctor || 'Object' };
-      const shallow = {};
-      for (const key of Object.keys(value).slice(0, 12)) {
-        const child = summarizeValue(value[key], depth + 1);
-        if (child !== undefined) shallow[key] = child;
-      }
-      return { type: ctor || 'Object', value: shallow };
-    }
-    return undefined;
-  }
-
-  function matchesPrefixes(element, prefixes) {
-    const tag = element.tagName.toLowerCase();
-    return prefixes.some(prefix => tag.startsWith(prefix));
-  }
-
-  function normalizeSelectorSet(selectors) {
-    if (!Array.isArray(selectors)) return new Set();
-    return new Set(
-      selectors
-        .map(selector => String(selector || '').trim().toLowerCase())
-        .filter(Boolean)
-    );
-  }
-
-  function getComponentMatchSelector(element) {
-    const tag = element.tagName.toLowerCase();
-    if (matchesPrefixes(element, DEFAULT_PREFIXES)) return tag;
-
-    const selector = getComponentSelector(getOwnAngularComponent(element));
-    return selector || tag;
-  }
-
-  function isScannableComponentElement(element, prefixes, selectorSet = new Set()) {
-    const tag = element.tagName.toLowerCase();
-    if (selectorSet.has(tag)) return true;
-    if (matchesPrefixes(element, prefixes)) return true;
-
-    const selector = getComponentSelector(getOwnAngularComponent(element));
-    return Boolean(selector && (selectorSet.has(selector) || prefixes.some(prefix => selector.startsWith(prefix))));
-  }
-
-  function createNode(element, id) {
-    const rawSelector = element.tagName.toLowerCase();
-    const angular = getAngularMetadata(element);
-    const selector = angular.componentSelector || rawSelector;
-    const className = angular.componentClassName;
-    return {
-      id,
-      selector,
-      rawSelector,
-      displayName: className || selector,
-      kind: getKind(selector),
-      elementPath: getElementPath(element),
-      attributes: getAttributes(element),
-      classes: Array.from(element.classList || []),
-      componentClassName: className,
-      directiveNames: angular.directiveNames,
-      inputs: angular.inputs,
-      outputs: angular.outputs,
-      hasAngularDebugApi: angular.hasAngularDebugApi,
-      componentInstanceSummary: angular.componentInstanceSummary,
-      componentProperties: angular.componentProperties,
-      debugErrors: {
-        component: angular.componentError,
-        directives: angular.directiveError,
-      },
-      domPreview: getDomPreview(element),
-      childIds: [],
-      children: [],
-    };
-  }
-
-  function buildTree(nodes, elementById, idByElement) {
-    const roots = [];
-    const nodeById = new Map(nodes.map(node => [node.id, node]));
-    for (const node of nodes) {
-      const element = elementById.get(node.id);
-      let parent = element.parentElement;
-      let parentNode = null;
-
-      while (parent) {
-        const parentId = idByElement.get(parent);
-        if (parentId) {
-          parentNode = nodeById.get(parentId);
-          break;
-        }
-        parent = parent.parentElement;
-      }
-
-      if (parentNode) {
-        parentNode.children.push(node);
-        parentNode.childIds.push(node.id);
-      } else {
-        roots.push(node);
-      }
-    }
-    return roots;
-  }
-
-  function scan(options = {}) {
-    const prefixes = options.prefixes || DEFAULT_PREFIXES;
-    const selectorSet = normalizeSelectorSet(options.selectors);
-    const elements = new Map();
-    const idByElement = new WeakMap();
-    const flatNodes = [];
-    const scanId = Date.now();
+  function scan() {
+    if (observer) renewWatcherLease();
+    const startedAt = performance.now();
+    const candidates = [];
 
     for (const element of document.querySelectorAll('*')) {
-      if (!isScannableComponentElement(element, prefixes, selectorSet)) continue;
-      const id = `cmp-${scanId}-${flatNodes.length}`;
-      elements.set(id, element);
-      idByElement.set(element, id);
-      flatNodes.push(createNode(element, id));
+      const tag = element.localName;
+      if (!tag || !tag.includes('-')) continue;
+
+      let component = null;
+      if (!isConfiguredComponentTag(element)) {
+        component = getOwnAngularComponent(element);
+        if (!component) continue;
+      }
+      candidates.push({ element, component });
     }
 
-    const tree = buildTree(flatNodes, elements, idByElement);
-    window[GLOBAL_KEY].elements = elements;
-    window[GLOBAL_KEY].lastScan = { scannedAt: new Date().toISOString(), count: flatNodes.length };
+    const nextElements = new Map();
+    const idByElement = new WeakMap();
+    const componentToElement = new WeakMap();
+    const flatNodes = [];
 
+    for (const candidate of candidates) {
+      const { element } = candidate;
+      const component = candidate.component || getOwnAngularComponent(element);
+      const id = getOrCreateElementId(element);
+      const rawSelector = element.localName;
+      const selector = getComponentSelector(component) || rawSelector;
+      const componentClassName = getAngularClassName(component);
+
+      nextElements.set(id, element);
+      idByElement.set(element, id);
+      if (component) componentToElement.set(component, element);
+      flatNodes.push({
+        id,
+        parentId: null,
+        selector,
+        rawSelector,
+        displayName: componentClassName || readableNameFromSelector(selector),
+        componentClassName,
+        kind: getKind(selector),
+      });
+    }
+
+    for (let index = 0; index < flatNodes.length; index++) {
+      flatNodes[index].parentId = findParentId(
+        candidates[index].element,
+        idByElement,
+        componentToElement,
+        flatNodes[index].id,
+      );
+    }
+
+    elements = nextElements;
     return {
       ok: true,
       version: VERSION,
       url: location.href,
-      userAgent: navigator.userAgent,
       angularDebugApi: Boolean(window.ng),
       count: flatNodes.length,
+      mutationVersion,
+      scanMs: Math.round((performance.now() - startedAt) * 100) / 100,
       flatNodes,
-      tree,
     };
   }
 
+  function getAttributes(element) {
+    const result = {};
+    for (const attribute of element.attributes || []) result[attribute.name] = attribute.value;
+    return result;
+  }
+
+  function getElementPath(element) {
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      const tag = current.localName;
+      let part = tag;
+      if (current.id) {
+        part += `#${current.id}`;
+      } else if (current.parentElement) {
+        const sameTagSiblings = Array.from(current.parentElement.children).filter(sibling => sibling.localName === tag);
+        if (sameTagSiblings.length > 1) part += `:nth-of-type(${sameTagSiblings.indexOf(current) + 1})`;
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+      if (tag === 'html') break;
+    }
+    return parts.join(' > ');
+  }
+
+  function getDomPreview(element) {
+    const attributes = Array.from(element.attributes || [])
+      .map(attribute => `${attribute.name}="${safeString(attribute.value, 120).replace(/"/g, '&quot;')}"`)
+      .join(' ');
+    const tag = element.localName;
+    return attributes ? `<${tag} ${attributes}>...</${tag}>` : `<${tag}>...</${tag}>`;
+  }
+
+  function getNodeDetails(id) {
+    const startedAt = performance.now();
+    const element = elements.get(id);
+    if (!element || !document.documentElement.contains(element)) {
+      return { ok: false, message: 'Element no longer exists. Refresh the component tree.' };
+    }
+
+    return {
+      ok: true,
+      id,
+      elementPath: getElementPath(element),
+      attributes: getAttributes(element),
+      classes: Array.from(element.classList || []),
+      domPreview: getDomPreview(element),
+      hasAngularDebugApi: Boolean(window.ng),
+      detailsMs: Math.round((performance.now() - startedAt) * 100) / 100,
+    };
+  }
+
+  function nodeContainsConfiguredComponent(node) {
+    if (!(node instanceof Element)) return false;
+    if (isConfiguredComponentTag(node)) return true;
+    for (const descendant of node.querySelectorAll('*')) {
+      if (isConfiguredComponentTag(descendant)) return true;
+    }
+    return false;
+  }
+
+  function mutationsContainComponentChange(records) {
+    for (const record of records) {
+      if (record.type !== 'childList') continue;
+      for (const node of record.addedNodes) {
+        if (nodeContainsConfiguredComponent(node)) return true;
+      }
+      for (const node of record.removedNodes) {
+        if (nodeContainsConfiguredComponent(node)) return true;
+      }
+    }
+    return false;
+  }
+
+  function startWatcher() {
+    if (observer || !document.documentElement) return;
+    observer = new MutationObserver(records => {
+      if (mutationsContainComponentChange(records)) mutationVersion++;
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  function stopWatcher() {
+    observer?.disconnect();
+    observer = null;
+    clearTimeout(watcherLeaseTimer);
+    watcherLeaseTimer = null;
+  }
+
+  function renewWatcherLease() {
+    if (!observer) return;
+    clearTimeout(watcherLeaseTimer);
+    watcherLeaseTimer = setTimeout(stopWatcher, WATCH_LEASE_MS);
+  }
+
+  function setWatching(enabled) {
+    if (!enabled) {
+      stopWatcher();
+      return { ok: true, watching: false, mutationVersion };
+    }
+    startWatcher();
+    renewWatcherLease();
+    return { ok: true, watching: Boolean(observer), mutationVersion };
+  }
+
+  function getMutationState() {
+    if (observer) renewWatcherLease();
+    return { ok: true, watching: Boolean(observer), mutationVersion };
+  }
+
   function inspectElementById(id) {
-    const element = window[GLOBAL_KEY].elements?.get(id);
+    const element = elements.get(id);
     if (!element || !document.documentElement.contains(element)) {
       return { ok: false, message: 'Element no longer exists. Refresh the component tree.' };
     }
@@ -376,9 +321,8 @@
       overlay.style.position = 'fixed';
       overlay.style.zIndex = '2147483647';
       overlay.style.pointerEvents = 'none';
-      overlay.style.border = '1px solid rgba(44, 136, 255, 0.95)';
-      overlay.style.background = 'rgba(65, 141, 255, 0.22)';
-      overlay.style.boxShadow = 'inset 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 0 1px rgba(44, 136, 255, 0.45)';
+      overlay.style.background = 'rgba(34, 197, 94, 0.12)';
+      overlay.style.border = '2px solid #22c55e';
       overlay.style.borderRadius = '2px';
       overlay.style.display = 'none';
       document.documentElement.appendChild(overlay);
@@ -387,14 +331,14 @@
   }
 
   function setHighlightEnabled(enabled) {
-    window[GLOBAL_KEY].highlightEnabled = Boolean(enabled);
-    if (!enabled) clearHighlight();
-    return { ok: true, enabled: window[GLOBAL_KEY].highlightEnabled };
+    highlightEnabled = Boolean(enabled);
+    if (!highlightEnabled) clearHighlight();
+    return { ok: true, enabled: highlightEnabled };
   }
 
   function highlightElementById(id, options = {}) {
-    if (!window[GLOBAL_KEY].highlightEnabled) return { ok: true, skipped: true };
-    const element = window[GLOBAL_KEY].elements?.get(id);
+    if (!highlightEnabled) return { ok: true, skipped: true };
+    const element = elements.get(id);
     if (!element || !document.documentElement.contains(element)) {
       return { ok: false, message: 'Element no longer exists. Refresh the component tree.' };
     }
@@ -405,90 +349,78 @@
     overlay.style.width = `${Math.max(0, rect.width)}px`;
     overlay.style.height = `${Math.max(0, rect.height)}px`;
     overlay.style.display = rect.width && rect.height ? 'block' : 'none';
-    clearTimeout(window[GLOBAL_KEY].highlightTimer);
-    window[GLOBAL_KEY].highlightTimer = null;
-    if (options.durationMs !== 0) {
-      window[GLOBAL_KEY].highlightTimer = setTimeout(clearHighlight, options.durationMs || 1400);
-    }
+    clearTimeout(highlightTimer);
+    highlightTimer = null;
+    if (options.durationMs !== 0) highlightTimer = setTimeout(clearHighlight, options.durationMs || 1400);
     return { ok: true };
   }
 
   function clearHighlight() {
     const overlay = document.getElementById(HIGHLIGHT_ID);
     if (overlay) overlay.style.display = 'none';
-    clearTimeout(window[GLOBAL_KEY].highlightTimer);
-    window[GLOBAL_KEY].highlightTimer = null;
+    clearTimeout(highlightTimer);
+    highlightTimer = null;
     return { ok: true };
   }
 
   function rememberContextElement(event) {
-    window[GLOBAL_KEY].lastContextElement = event.target instanceof Element ? event.target : null;
+    lastContextElement = event.target instanceof Element ? event.target : null;
   }
 
-  function findNearestComponentElement(start, prefixes = DEFAULT_PREFIXES, selectorSet = new Set()) {
+  function findNearestComponentElement(start, preferredPrefixes = []) {
     let current = start instanceof Element ? start : null;
     while (current) {
-      if (isScannableComponentElement(current, prefixes, selectorSet)) return current;
+      const tag = current.localName;
+      if (preferredPrefixes.length && preferredPrefixes.some(prefix => tag.startsWith(prefix))) return current;
+      if (!preferredPrefixes.length && isConfiguredComponentTag(current)) return current;
       current = current.parentElement;
-    }
-    return null;
-  }
-
-  function getIdForElement(element) {
-    for (const [id, candidate] of window[GLOBAL_KEY].elements || []) {
-      if (candidate === element) return id;
     }
     return null;
   }
 
   function selectLastContextComponent(options = {}) {
     const preferredPrefixes = Array.isArray(options.preferredPrefixes) ? options.preferredPrefixes : [];
-    const fallbackPrefixes = options.prefixes || DEFAULT_PREFIXES;
-    const selectorSet = normalizeSelectorSet(options.selectors);
-    const preferredElement = preferredPrefixes.length
-      ? findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, preferredPrefixes, selectorSet)
-      : null;
-    const componentElement = preferredElement || findNearestComponentElement(window[GLOBAL_KEY].lastContextElement, fallbackPrefixes, selectorSet);
-    if (!componentElement) {
-      return { ok: false, message: 'No component host was found for the last right-clicked element.' };
-    }
+    const preferred = preferredPrefixes.length ? findNearestComponentElement(lastContextElement, preferredPrefixes) : null;
+    const componentElement = preferred || findNearestComponentElement(lastContextElement);
+    if (!componentElement) return { ok: false, message: 'No component host was found for the last right-clicked element.' };
 
-    const id = getIdForElement(componentElement);
-    if (!id) {
+    const id = elementIds.get(componentElement);
+    if (!id || !elements.has(id)) {
       return {
         ok: false,
         needsRefresh: true,
-        selector: getComponentMatchSelector(componentElement),
-        elementPath: getElementPath(componentElement),
+        selector: componentElement.localName,
         message: 'Component exists, but it is not in the current scan. Refreshing can link it.',
       };
     }
-
-    return {
-      ok: true,
-      id,
-      selector: getComponentMatchSelector(componentElement),
-      elementPath: getElementPath(componentElement),
-    };
+    return { ok: true, id, selector: componentElement.localName };
   }
 
-  window[GLOBAL_KEY] = {
+  function destroy() {
+    stopWatcher();
+    clearHighlight();
+    document.removeEventListener('contextmenu', rememberContextElement, true);
+    document.getElementById(HIGHLIGHT_ID)?.remove();
+    elements = new Map();
+    elementIds = new WeakMap();
+  }
+
+  const api = {
     version: VERSION,
-    elements: new Map(),
-    lastContextElement: null,
-    highlightEnabled: false,
-    highlightTimer: null,
+    configure,
     scan,
+    getNodeDetails,
+    setWatching,
+    getMutationState,
     inspectElementById,
     selectLastContextComponent,
     setHighlightEnabled,
     highlightElementById,
     clearHighlight,
+    destroy,
   };
 
-  document.removeEventListener('contextmenu', rememberContextElement, true);
   document.addEventListener('contextmenu', rememberContextElement, true);
-
-  return window[GLOBAL_KEY];
+  window[GLOBAL_KEY] = api;
+  return api;
 })();
-
