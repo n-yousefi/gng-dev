@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GIG Components</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="toolbar-row toolbar-top">
+        <div class="toolbar-actions">
+          <button id="inspectPickerButton" type="button" title="Click a component on the page to select it" class="inspect-picker-button">🎯 Pick</button>
+          <button id="refreshButton" type="button" title="Refresh component tree">Refresh</button>
+          <button id="indexRefreshButton" class="index-refresh-button is-missing" type="button" title="Refresh component index" aria-label="Refresh component index">
+            <span class="refresh-icon" aria-hidden="true">&#8635;</span>
+          </button>
+        </div>
+
+        <div class="toolbar-filters">
+          <div class="segmented-filter" role="group" aria-label="Component owner filter">
+            <button class="filter-button active" type="button" data-filter="all">All</button>
+            <button class="filter-button" type="button" data-filter="components">Source</button>
+            <button class="filter-button" type="button" data-filter="gng">GNG</button>
+          </div>
+          <label class="toggle" title="Outline selected or hovered components on the inspected page.">
+            <input id="highlightToggle" type="checkbox" />
+            <span>Hi</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="toolbar-row toolbar-search">
+        <input id="searchInput" type="search" placeholder="Search selector, class, path, attributes..." />
+      </div>
+
+      <div class="toolbar-row toolbar-meta">
+        <span id="indexMeta" class="index-meta">No index</span>
+        <span id="statusText" class="status">Idle</span>
+      </div>
+    </header>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <main class="shell">
+      <aside class="tree-pane">
+        <div class="pane-title">
+          <span id="treePaneTitle">Components</span>
+          <span class="pane-title-actions">
+            <span id="changeSummary" class="change-summary hidden"></span>
+            <button id="sourceScopeButton" class="source-scope-button hidden" type="button">Show page</button>
+            <button id="clearFocusButton" class="clear-focus-button hidden" type="button" title="Show full component tree">Clear focus</button>
+            <span id="componentCount" class="muted">0</span>
+          </span>
+        </div>
+        <div id="sourceNotice" class="source-notice hidden"></div>
+        <div id="pinnedPane" class="pinned-pane hidden">
+          <div class="pinned-title">Pinned</div>
+          <div id="pinnedList" class="pinned-list"></div>
+        </div>
+        <div id="treeRoot" class="tree-root empty">Click Refresh to scan the page.</div>
+      </aside>
+
+      <!-- Details Popup Modal over the Tree -->
+      <div id="detailsModalBackdrop" class="details-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="detailsTitle">
+        <section class="details-pane">
+          <div id="emptyDetails" class="empty-details hidden">
+            Select a component or source trail to find the code responsible for it.
+          </div>
+
+          <div id="detailsContent" class="details-content">
+            <div class="details-header">
+              <div class="details-header-top">
+                <div class="details-title-wrap">
+                  <h1 id="detailsTitle"></h1>
+                  <div id="detailsBadges" class="badges"></div>
+                </div>
+                <button id="closeDetailsButton" class="close-details-button" type="button" title="Close details (Esc)" aria-label="Close details">&times;</button>
+              </div>
+              <div id="detailsActions" class="details-actions-bar"></div>
+            </div>
+
+            <nav class="tabs" aria-label="Details tabs">
+              <button class="tab active" type="button" data-tab="overview">Overview</button>
+              <button class="tab" type="button" data-tab="changes">Changes</button>
+            </nav>
+
+            <section id="tab-overview" class="tab-panel active"></section>
+            <section id="tab-changes" class="tab-panel"></section>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <div id="contextMenu" class="context-menu hidden">
+      <button type="button" class="context-menu-item" data-action="copySubTree">Copy Sub Tree</button>
+    </div>
+
+    <!-- placeholder so panel.js getElementById('selectedElementButton') doesn't throw -->
+    <button id="selectedElementButton" type="button" style="display:none"></button>
+
+    <script src="source-loader.js"></script>
+    <script src="panel.js"></script>
+  </body>
+</html>

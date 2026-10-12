@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "GIG Component Inspector",
+  "version": "0.4.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4WKW4L2+ZwoG46mi4zDiwFQyGSqAY+UrXIluFaNOLQsv0DzmhO6sHrA83j25PIh2OK2sHPHZg8Qy5+VnxTUznLoKr0RkUe4/WQ3Z+LF0F2i8Q0kkc0A3oOAKmcRnD0I7AldrVPV+/q0pZl8PT8pwGpTGaqGAoIMdDNuZugGkhRqslp3LCEDMBrLkOyHR2p9ib/Ho0nxMLXthN8m4cBEgSZniDZHS5UkPdM/3VTctHssQ3Sl8XmXLaNBT/wJWDkP0oMg/cc+ZoMHlYOM+fUwq7yTricSUjKgoI5HiEMI/LIlWngJQqG+4efBWn0luNqKGDhOV/nho+PTxk1TBjuM6tQIDAQAB",
+  "description": "Side panel for inspecting rendered GIG/GNG Angular component trees — no DevTools required.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open GIG Inspector",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "permissions": [
+    "contextMenus",
+    "nativeMessaging",
+    "storage",
+    "sidePanel",
+    "scripting",
+    "tabs",
+    "windows"
+  ],
+  "host_permissions": ["<all_urls>", "file:///*"]
+}

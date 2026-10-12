@@ -12,7 +12,7 @@
       <button id="selectedElementButton" type="button" title="Find the component containing the selected Elements node">Find $0</button>
       <div class="segmented-filter" role="group" aria-label="Component owner filter">
         <button class="filter-button active" type="button" data-filter="all">All</button>
-        <button class="filter-button" type="button" data-filter="components">Components</button>
+        <button class="filter-button" type="button" data-filter="components">Source</button>
         <button class="filter-button" type="button" data-filter="gng">GNG</button>
       </div>
       <input id="searchInput" type="search" placeholder="Search selector, class, path, attributes" />
@@ -31,13 +31,15 @@
     <main class="shell">
       <aside class="tree-pane">
         <div class="pane-title">
-          <span>Components</span>
+          <span id="treePaneTitle">Components</span>
           <span class="pane-title-actions">
             <span id="changeSummary" class="change-summary hidden"></span>
+            <button id="sourceScopeButton" class="source-scope-button hidden" type="button">Show page</button>
             <button id="clearFocusButton" class="clear-focus-button hidden" type="button" title="Show full component tree">Clear focus</button>
             <span id="componentCount" class="muted">0</span>
           </span>
         </div>
+        <div id="sourceNotice" class="source-notice hidden"></div>
         <div id="pinnedPane" class="pinned-pane hidden">
           <div class="pinned-title">Pinned</div>
           <div id="pinnedList" class="pinned-list"></div>
@@ -47,7 +49,7 @@
 
       <section class="details-pane">
         <div id="emptyDetails" class="empty-details">
-          Select a component to inspect its attributes, metadata, and template.
+          Select a component or source trail to find the code responsible for it.
         </div>
 
         <div id="detailsContent" class="details-content hidden">

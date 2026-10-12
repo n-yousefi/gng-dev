@@ -271,7 +271,8 @@ input {
   gap: 6px;
 }
 
-.clear-focus-button {
+.clear-focus-button,
+.source-scope-button {
   min-height: 22px;
   border: 1px solid var(--line-strong);
   border-radius: 4px;
@@ -281,7 +282,8 @@ input {
   cursor: pointer;
 }
 
-.clear-focus-button:hover {
+.clear-focus-button:hover,
+.source-scope-button:hover {
   background: var(--accent-soft);
   border-color: var(--accent);
 }
@@ -453,9 +455,27 @@ input {
   color: var(--muted);
 }
 
+.source-notice {
+  margin: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--warning);
+  border-radius: 4px;
+  background: rgba(253, 214, 99, 0.10);
+  color: var(--warning);
+}
+
 .runtime-title {
   margin-left: 6px;
   color: var(--accent);
+}
+
+.tree-node[data-kind="source-form"] .selector,
+.tree-node[data-kind="source-modal"] .selector {
+  color: var(--accent);
+}
+
+.tree-node[data-kind="source-field"] .selector {
+  font-family: Consolas, "Courier New", monospace;
 }
 
 .match {

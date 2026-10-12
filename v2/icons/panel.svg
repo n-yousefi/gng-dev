@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="GIG Component Inspector">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e3a8a"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="5" width="118" height="118" rx="30" fill="url(#bg)" stroke="url(#rim)" stroke-width="6"/>
+  <g stroke="#94a3b8" stroke-width="8" stroke-linecap="round">
+    <line x1="35" y1="36" x2="35" y2="93"/>
+    <line x1="35" y1="36" x2="61" y2="36"/>
+    <line x1="35" y1="66" x2="56" y2="66"/>
+    <line x1="35" y1="93" x2="49" y2="93"/>
+  </g>
+  <circle cx="35" cy="36" r="9.5" fill="#38bdf8"/>
+  <circle cx="61" cy="36" r="9.5" fill="#34d399"/>
+  <circle cx="56" cy="66" r="9.5" fill="#38bdf8"/>
+  <circle cx="49" cy="93" r="9.5" fill="#fbbf24"/>
+  <line x1="93" y1="88" x2="105" y2="102" stroke="#38bdf8" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="77" cy="72" r="24" fill="#0f172a" fill-opacity="0.85" stroke="#38bdf8" stroke-width="9"/>
+  <circle cx="77" cy="72" r="9.5" fill="#34d399"/>
+</svg>

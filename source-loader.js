@@ -1,6 +1,12 @@
 (function createSourceLoader(global) {
   const FRAMEWORK_PREFIXES = ['gng-', 'gig-', 'gsm-'];
   const CREATED_PREFIXES = ['sl-', 'app-'];
+  const FRAMEWORK_APP_SELECTOR_PATTERNS = [
+    /^app-modal(?:-|$)/,
+    /^app-dynamic-form$/,
+    /^app-form(?:-|$)/,
+    /^app-(?:pagination|filter|string-filter|scroller|context-menu)$/,
+  ];
 
   function normalizeSelector(selector) {
     return (selector || '').trim().toLowerCase();
@@ -17,6 +23,7 @@
 
   function getSelectorFamily(selector) {
     const normalized = normalizeSelector(selector);
+    if (FRAMEWORK_APP_SELECTOR_PATTERNS.some(pattern => pattern.test(normalized))) return 'framework';
     if (FRAMEWORK_PREFIXES.some(prefix => normalized.startsWith(prefix))) return 'framework';
     if (CREATED_PREFIXES.some(prefix => normalized.startsWith(prefix))) return 'created';
     return 'created';
@@ -42,6 +49,9 @@
       templateUrl,
       styleUrls: (entry.styleUrls || []).map(normalizePath),
       relatedColumnServices: (entry.relatedColumnServices || []).map(normalizePath),
+      fields: (entry.fields || [])
+        .map(field => ({ name: String(field?.name || '').trim(), line: Number(field?.line) || null }))
+        .filter(field => field.name),
       componentFileName: entry.componentFileName || componentTs.split('/').pop() || '',
     };
   }
@@ -141,6 +151,26 @@
     return result.sort((left, right) => left.componentTs.localeCompare(right.componentTs));
   }
 
+  function findFieldSources(source, columnServices, fieldName) {
+    const normalizedName = String(fieldName || '').trim();
+    const services = findRelatedColumnServices(source, columnServices);
+    if (!normalizedName) return { exact: [], services };
+
+    const exact = [];
+    for (const service of services) {
+      for (const field of service.fields || []) {
+        if (field.name !== normalizedName || !field.line) continue;
+        exact.push({
+          ...service,
+          selectorLine: field.line,
+          fieldName: normalizedName,
+        });
+      }
+    }
+
+    return { exact, services };
+  }
+
   function isCreatedComponent(node, index) {
     const source = findSource(node, index).source;
     if (source?.componentTs) return true;
@@ -164,14 +194,16 @@
         entries: Array.isArray(json) ? json : json.components || [],
         projectRoot: Array.isArray(json) ? '' : normalizePath(json.projectRoot || ''),
         generatedAt: Array.isArray(json) ? '' : json.generatedAt || '',
+        schemaVersion: Array.isArray(json) ? 1 : Number(json.schemaVersion) || 1,
       };
     } catch (_error) {
-      return { entries: [], projectRoot: '' };
+      return { entries: [], projectRoot: '', schemaVersion: 1 };
     }
   }
 
   global.GIGSourceLoader = {
     createIndex,
+    findFieldSources,
     findRelatedColumnServices,
     findSource,
     getSelectorFamily,

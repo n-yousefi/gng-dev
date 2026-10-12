@@ -11,6 +11,9 @@ const els = {
   componentCount: document.getElementById("componentCount"),
   changeSummary: document.getElementById("changeSummary"),
   clearFocusButton: document.getElementById("clearFocusButton"),
+  treePaneTitle: document.getElementById("treePaneTitle"),
+  sourceScopeButton: document.getElementById("sourceScopeButton"),
+  sourceNotice: document.getElementById("sourceNotice"),
   pinnedPane: document.getElementById("pinnedPane"),
   pinnedList: document.getElementById("pinnedList"),
   treeRoot: document.getElementById("treeRoot"),
@@ -27,7 +30,8 @@ const NATIVE_HOST_NAME = "com.gng.dev_indexer";
 const LOCAL_INDEX_FILE = "component-index.json";
 const INDEX_UPDATED_STORAGE_KEY = "gigComponentInspector.indexUpdatedAt";
 const AUTO_REFRESH_DELAY_MS = 600;
-const BRIDGE_VERSION = 3;
+const BRIDGE_VERSION = 4;
+const FIELD_INDEX_SCHEMA_VERSION = 3;
 const MUTATION_POLL_INTERVAL_MS = 1000;
 const MIN_AUTO_SCAN_INTERVAL_MS = 2000;
 const SEARCH_DEBOUNCE_MS = 120;
@@ -40,6 +44,7 @@ const state = {
   selectedId: null,
   sourceIndex: new Map(),
   columnServices: [],
+  indexSchemaVersion: 1,
   scanPrefixes: DEFAULT_SCAN_PREFIXES,
   scanSelectors: [],
   loadedIndexCount: 0,
@@ -50,6 +55,13 @@ const state = {
   collapsedIds: new Set(),
   focusRootId: null,
   parentById: new Map(),
+  sourceTree: [],
+  virtualIds: new Set(),
+  activeModalId: null,
+  activeModalSignature: "",
+  sourceSuppressedModalId: null,
+  sourceAutoSelectId: null,
+  sourceOwnerId: null,
   pins: new Map(),
   scanDiff: null,
   highlightEnabled: true,
@@ -62,6 +74,7 @@ const state = {
   searchTimeoutId: null,
   panelVisible: !document.hidden,
   lastMutationVersion: null,
+  lastModalSignature: "",
   lastScanStartedAt: 0,
   detailsInFlight: new Map(),
   activationInFlight: null,
@@ -131,8 +144,13 @@ async function pollMutationState() {
     }
     if (state.lastMutationVersion == null) {
       state.lastMutationVersion = mutationState?.mutationVersion ?? 0;
-    } else if ((mutationState?.mutationVersion ?? state.lastMutationVersion) !== state.lastMutationVersion) {
+      state.lastModalSignature = mutationState?.modalSignature || "";
+    } else if (
+      (mutationState?.mutationVersion ?? state.lastMutationVersion) !== state.lastMutationVersion ||
+      (mutationState?.modalSignature || "") !== state.lastModalSignature
+    ) {
       state.lastMutationVersion = mutationState.mutationVersion;
+      state.lastModalSignature = mutationState?.modalSignature || "";
       const elapsed = performance.now() - state.lastScanStartedAt;
       scheduleRefresh(Math.max(150, MIN_AUTO_SCAN_INTERVAL_MS - elapsed));
     }
@@ -157,6 +175,7 @@ function bindEvents() {
   els.searchInput.addEventListener("input", () => handleSearchChanged());
   els.indexRefreshButton.addEventListener("click", () => rebuildIndexWithNativeHost());
   els.clearFocusButton.addEventListener("click", () => clearTreeFocus());
+  els.sourceScopeButton.addEventListener("click", toggleSourceScope);
   els.highlightToggle.addEventListener("change", () => {
     setPageHighlightEnabled(els.highlightToggle.checked);
     savePreferences();
@@ -165,7 +184,7 @@ function bindEvents() {
     button.addEventListener("click", () => {
       state.ownerFilter = button.dataset.filter || "all";
       syncFilterButtons();
-      applyTreeFilters();
+      renderTree(state.scan?.tree || []);
       syncSelectionWithActiveFilter();
       savePreferences();
     });
@@ -193,6 +212,8 @@ function bindEvents() {
   chrome.devtools?.network?.onNavigated?.addListener(async () => {
     state.bridgeInjected = false;
     state.lastMutationVersion = null;
+    state.lastModalSignature = "";
+    state.sourceSuppressedModalId = null;
     await loadLocalIndex();
     await loadPreferences();
     scheduleRefresh(AUTO_REFRESH_DELAY_MS);
@@ -327,6 +348,8 @@ async function loadLocalIndex() {
 function clearIndexState() {
   state.sourceIndex = new Map();
   state.columnServices = [];
+  state.indexSchemaVersion = 1;
+  state.sourceTree = [];
   state.scanPrefixes = DEFAULT_SCAN_PREFIXES;
   state.scanSelectors = [];
   state.loadedIndexCount = 0;
@@ -345,6 +368,7 @@ function normalizeIndexManifest(value, project = {}) {
     projectName: project.name || source.projectName || "",
     projectRoot: Array.isArray(source) ? "" : normalizePath(source.projectRoot || project.clientAppRoot || ""),
     generatedAt: Array.isArray(source) ? "" : source.generatedAt || "",
+    schemaVersion: Array.isArray(source) ? 1 : Number(source.schemaVersion) || 1,
   };
 }
 
@@ -360,6 +384,7 @@ function applyIndexManifest(value, project = {}) {
   const indexResult = window.GIGSourceLoader.createIndex(manifest.entries);
   state.sourceIndex = indexResult instanceof Map ? indexResult : indexResult.bySelector;
   state.columnServices = indexResult.columnServices || [];
+  state.indexSchemaVersion = manifest.schemaVersion;
   state.scanPrefixes = DEFAULT_SCAN_PREFIXES;
   state.scanSelectors = getScanSelectors(manifest.entries);
   state.loadedIndexCount = manifest.entries.filter(entry => entry?.selector).length;
@@ -578,8 +603,289 @@ function buildTreeFromFlat(flatNodes) {
   return { roots, nodesById };
 }
 
+function clearVirtualNodes() {
+  for (const id of state.virtualIds) {
+    state.flatById.delete(id);
+    state.parentById.delete(id);
+  }
+  state.virtualIds = new Set();
+  state.sourceAutoSelectId = null;
+  state.sourceOwnerId = null;
+}
+
+function cloneSourceTreeNode(node) {
+  return {
+    ...node,
+    childIds: [],
+    children: [],
+  };
+}
+
+function registerVirtualNode(node) {
+  const virtualNode = {
+    kind: "source",
+    childIds: [],
+    children: [],
+    attributes: {},
+    classes: [],
+    detailsLoaded: true,
+    ...node,
+    isVirtual: true,
+  };
+  state.virtualIds.add(virtualNode.id);
+  state.flatById.set(virtualNode.id, virtualNode);
+  state.parentById.set(virtualNode.id, virtualNode.parentId || null);
+  prepareNodeSearchText(virtualNode);
+  return virtualNode;
+}
+
+function findFirstDescendant(node, predicate) {
+  const pending = [...(node?.children || [])];
+  while (pending.length) {
+    const current = pending.shift();
+    if (predicate(current)) return current;
+    pending.unshift(...(current.children || []));
+  }
+  return null;
+}
+
+function collectDescendants(node, predicate) {
+  const result = [];
+  const pending = [...(node?.children || [])];
+  while (pending.length) {
+    const current = pending.shift();
+    if (predicate(current)) result.push(current);
+    pending.push(...(current.children || []));
+  }
+  return result;
+}
+
+function buildCompactSourceTree() {
+  const rawNodes = Array.from(state.flatById.values()).filter(node => !node.isVirtual && isIndexedComponent(node));
+  const clones = new Map(rawNodes.map(node => [node.id, cloneSourceTreeNode(node)]));
+  const roots = [];
+
+  for (const node of rawNodes) {
+    const clone = clones.get(node.id);
+    let parentId = state.parentById.get(node.id);
+    while (parentId && !clones.has(parentId)) parentId = state.parentById.get(parentId);
+    const parent = parentId ? clones.get(parentId) : null;
+    if (parent) {
+      clone.parentId = parent.id;
+      parent.children.push(clone);
+      parent.childIds.push(clone.id);
+    } else {
+      clone.parentId = null;
+      roots.push(clone);
+    }
+  }
+
+  return roots;
+}
+
+function getDynamicFormContext(activeModal) {
+  const ancestors = getComponentAncestors(activeModal.id);
+  const generatedWrapper = [...ancestors].reverse().find(node => node.selector === "app-modal-edit-form") || null;
+  const ancestorDynamicForm = [...ancestors].reverse().find(node => node.selector === "app-dynamic-form") || null;
+  const dynamicForm = ancestorDynamicForm || findFirstDescendant(
+    generatedWrapper || activeModal,
+    node => node.selector === "app-dynamic-form",
+  );
+  if (!generatedWrapper && !dynamicForm) return null;
+
+  const owner = getNearestIndexedComponent((generatedWrapper || dynamicForm).id);
+  if (!owner) return null;
+  const activeField = [...ancestors].reverse().find(node => node.fieldInfo?.name) || null;
+  return { generatedWrapper, dynamicForm, owner, activeField };
+}
+
+function mergeRenderedFieldLabels(dynamicForm, fields) {
+  const renderedByName = new Map();
+  for (const node of collectDescendants(dynamicForm, item => Boolean(item.fieldInfo?.name))) {
+    if (!renderedByName.has(node.fieldInfo.name) || node.fieldInfo.label) {
+      renderedByName.set(node.fieldInfo.name, node.fieldInfo);
+    }
+  }
+  return (fields || []).map(field => ({ ...field, ...(renderedByName.get(field.name) || {}) }));
+}
+
+function createSourceResult(source, candidates = []) {
+  const usableCandidates = (candidates || []).filter(candidate => candidate?.componentTs || candidate?.templateUrl);
+  if (source?.componentTs || source?.templateUrl) {
+    return { found: true, source, candidates: usableCandidates, ambiguous: false };
+  }
+  return {
+    found: false,
+    source: source || { selectorFamily: "created", componentTs: "", templateUrl: "" },
+    candidates: usableCandidates,
+    ambiguous: usableCandidates.length > 1,
+    message: usableCandidates.length ? `${usableCandidates.length} source candidates found.` : "No source index entry found.",
+  };
+}
+
+function getPrimaryColumnService(ownerSource, services) {
+  const configured = new Set((ownerSource.relatedColumnServices || []).map(normalizePath));
+  const explicit = (services || []).filter(service => configured.has(normalizePath(service.componentTs)));
+  if (explicit.length === 1) return explicit[0];
+  return services?.length === 1 ? services[0] : null;
+}
+
+function buildGeneratedModalSourceTree(activeModal, context) {
+  const ownerClone = cloneSourceTreeNode(context.owner);
+  ownerClone.parentId = null;
+  const ownerSource = getNodeSource(context.owner);
+  const relatedServices = window.GIGSourceLoader.findRelatedColumnServices(ownerSource, state.columnServices);
+  const modalTitle = activeModal.modalInfo?.title || activeModal.runtimeTitle || "Generated CRUD form";
+  const mode = context.generatedWrapper?.generatedFormInfo?.mode || context.dynamicForm?.dynamicFormInfo?.mode || "Edit";
+  const formId = `source-form:${activeModal.id}`;
+  const formSource = getPrimaryColumnService(ownerSource, relatedServices);
+  const formNode = registerVirtualNode({
+    id: formId,
+    parentId: ownerClone.id,
+    selector: "Generated CRUD form",
+    displayName: "Generated CRUD form",
+    componentClassName: mode,
+    runtimeTitle: modalTitle,
+    runtimeTitleKey: activeModal.modalInfo?.titleKey || activeModal.runtimeTitleKey || "",
+    virtualType: "generated-form",
+    kind: "source-form",
+    sourceResult: createSourceResult(formSource, relatedServices),
+    sourceTrail: {
+      type: "generated-form",
+      ownerId: context.owner.id,
+      modalId: activeModal.id,
+      mode,
+      title: modalTitle,
+      titleKey: activeModal.modalInfo?.titleKey || activeModal.runtimeTitleKey || "",
+      generationChain: ["gig-crud-table", "app-modal-edit-form", "app-dynamic-form"],
+      services: relatedServices,
+    },
+  });
+
+  ownerClone.children.push(formNode);
+  ownerClone.childIds.push(formNode.id);
+  state.sourceOwnerId = ownerClone.id;
+  state.sourceAutoSelectId = formNode.id;
+
+  const fields = mergeRenderedFieldLabels(
+    context.dynamicForm,
+    context.dynamicForm?.dynamicFormInfo?.fields || [],
+  );
+  const seenNames = new Set();
+  for (const field of fields) {
+    if (!field.name || seenNames.has(field.name)) continue;
+    seenNames.add(field.name);
+    const mapping = window.GIGSourceLoader.findFieldSources(ownerSource, state.columnServices, field.name);
+    const exactSource = mapping.exact.length === 1 ? mapping.exact[0] : null;
+    const fallbackSource = !mapping.exact.length ? getPrimaryColumnService(ownerSource, mapping.services) : null;
+    const fieldId = `source-field:${activeModal.id}:${field.name}`;
+    const fieldNode = registerVirtualNode({
+      id: fieldId,
+      parentId: formNode.id,
+      selector: field.name,
+      displayName: field.name,
+      componentClassName: field.type || "field",
+      runtimeTitle: field.label || field.i18nName || "",
+      virtualType: "field",
+      kind: "source-field",
+      fieldInfo: field,
+      sourceResult: createSourceResult(exactSource || fallbackSource, mapping.exact.length > 1 ? mapping.exact : mapping.services),
+      sourceTrail: {
+        type: "field",
+        ownerId: context.owner.id,
+        formId,
+        field,
+        exact: Boolean(exactSource),
+        exactMatches: mapping.exact,
+        services: mapping.services,
+      },
+    });
+    formNode.children.push(fieldNode);
+    formNode.childIds.push(fieldNode.id);
+    if (context.activeField?.fieldInfo?.name === field.name) state.sourceAutoSelectId = fieldNode.id;
+  }
+
+  return [ownerClone];
+}
+
+function buildCustomModalSourceTree(activeModal) {
+  const contentComponent = findFirstDescendant(activeModal, node => isIndexedComponent(node));
+  const declaringOwner = getNearestIndexedComponent(activeModal.id);
+  const primarySourceNode = contentComponent || declaringOwner;
+  if (!primarySourceNode) return buildCompactSourceTree();
+
+  const rootNode = declaringOwner ? cloneSourceTreeNode(declaringOwner) : null;
+  if (rootNode) {
+    rootNode.parentId = null;
+    state.sourceOwnerId = rootNode.id;
+  }
+  const primarySource = getNodeSource(primarySourceNode);
+  const modalId = `source-modal:${activeModal.id}`;
+  const modalNode = registerVirtualNode({
+    id: modalId,
+    parentId: rootNode?.id || null,
+    selector: "Active custom modal",
+    displayName: "Active custom modal",
+    componentClassName: primarySource.className || primarySourceNode.componentClassName || "",
+    runtimeTitle: activeModal.modalInfo?.title || activeModal.runtimeTitle || "",
+    runtimeTitleKey: activeModal.modalInfo?.titleKey || activeModal.runtimeTitleKey || "",
+    virtualType: "custom-modal",
+    kind: "source-modal",
+    sourceResult: createSourceResult(primarySource),
+    sourceTrail: {
+      type: "custom-modal",
+      ownerId: declaringOwner?.id || null,
+      contentId: contentComponent?.id || null,
+      modalId: activeModal.id,
+    },
+  });
+  state.sourceAutoSelectId = modalNode.id;
+
+  if (rootNode) {
+    rootNode.children.push(modalNode);
+    rootNode.childIds.push(modalNode.id);
+    if (contentComponent && contentComponent.id !== rootNode.id) {
+      const contentClone = cloneSourceTreeNode(contentComponent);
+      contentClone.parentId = modalNode.id;
+      modalNode.children.push(contentClone);
+      modalNode.childIds.push(contentClone.id);
+    }
+    return [rootNode];
+  }
+  return [modalNode];
+}
+
+function buildSourceTree() {
+  clearVirtualNodes();
+  const activeModal = state.activeModalId ? state.flatById.get(state.activeModalId) : null;
+  if (!activeModal || state.sourceSuppressedModalId === activeModal.id) {
+    state.sourceTree = buildCompactSourceTree();
+    return;
+  }
+
+  const dynamicContext = getDynamicFormContext(activeModal);
+  state.sourceTree = dynamicContext
+    ? buildGeneratedModalSourceTree(activeModal, dynamicContext)
+    : buildCustomModalSourceTree(activeModal);
+}
+
+function toggleSourceScope() {
+  if (!state.activeModalId) return;
+  const previousOwnerId = state.sourceOwnerId;
+  state.sourceSuppressedModalId = state.sourceSuppressedModalId === state.activeModalId ? null : state.activeModalId;
+  buildSourceTree();
+  renderTree(state.scan?.tree || []);
+  if (!state.sourceSuppressedModalId && state.sourceAutoSelectId) {
+    selectNode(state.sourceAutoSelectId, { reveal: true, keepHighlight: true });
+  } else if (previousOwnerId && state.flatById.has(previousOwnerId)) {
+    selectNode(previousOwnerId, { reveal: true, keepHighlight: true });
+  } else {
+    showEmptyDetails();
+  }
+}
+
 function getNodeSource(node) {
-  return window.GIGSourceLoader.findSource(node, state.sourceIndex).source || {};
+  return getNodeSourceResult(node).source || {};
 }
 
 function getScanSelectors(entries = []) {
@@ -649,11 +955,24 @@ async function refresh() {
     for (const node of state.flatById.values()) prepareNodeSearchText(node);
     state.parentById = new Map(Array.from(state.flatById.values(), node => [node.id, node.parentId || null]));
     state.lastMutationVersion = result.mutationVersion ?? state.lastMutationVersion ?? 0;
+    state.lastModalSignature = result.activeModalSignature || "";
+    state.activeModalId = result.activeModalId || null;
+    state.activeModalSignature = result.activeModalSignature || "";
+    if (state.sourceSuppressedModalId && state.sourceSuppressedModalId !== state.activeModalId) {
+      state.sourceSuppressedModalId = null;
+    }
+    const previousSourceOwnerId = state.sourceOwnerId;
+    buildSourceTree();
     state.selectedId = previousSelection && state.flatById.has(previousSelection) ? previousSelection : null;
     if (state.focusRootId && !state.flatById.has(state.focusRootId)) state.focusRootId = null;
     renderTree(state.scan.tree);
     renderPins();
-    if (state.selectedId) selectNode(state.selectedId, { reveal: false, keepHighlight: true });
+    if (state.ownerFilter === "components" && state.sourceAutoSelectId && !state.sourceSuppressedModalId) {
+      selectNode(state.sourceAutoSelectId, { reveal: true, keepHighlight: true });
+    } else if (state.selectedId) selectNode(state.selectedId, { reveal: false, keepHighlight: true });
+    else if (state.ownerFilter === "components" && previousSourceOwnerId && state.flatById.has(previousSourceOwnerId)) {
+      selectNode(previousSourceOwnerId, { reveal: true, keepHighlight: true });
+    }
     else showEmptyDetails();
     state.scanSummary = `Found ${result.count} components in ${result.scanMs ?? "?"} ms${result.angularDebugApi ? " with Angular debug API" : ""}`;
     updateIndexMeta();
@@ -707,12 +1026,15 @@ function evalInInspectedPage(expression) {
 
 function renderTree(tree) {
   const displayTree = getDisplayTree(tree);
-  els.clearFocusButton.classList.toggle("hidden", !state.focusRootId);
+  updateSourceViewChrome();
+  els.clearFocusButton.classList.toggle("hidden", !state.focusRootId || state.ownerFilter === "components");
   renderChangeSummary();
   els.componentCount.textContent = String(countTreeNodes(displayTree));
   if (!displayTree?.length) {
     els.treeRoot.className = "tree-root empty";
-    els.treeRoot.textContent = "No matching component hosts found on this page.";
+    els.treeRoot.textContent = state.ownerFilter === "components"
+      ? "No indexed application sources were found on this page."
+      : "No matching component hosts found on this page.";
     return;
   }
 
@@ -720,6 +1042,23 @@ function renderTree(tree) {
   els.treeRoot.innerHTML = "";
   els.treeRoot.appendChild(renderTreeList(displayTree));
   applyTreeFilters();
+}
+
+function updateSourceViewChrome() {
+  const sourceMode = state.ownerFilter === "components";
+  els.treePaneTitle.textContent = sourceMode ? "Source" : "Components";
+  const hasActiveModal = Boolean(state.activeModalId);
+  els.sourceScopeButton.classList.toggle("hidden", !sourceMode || !hasActiveModal);
+  els.sourceScopeButton.textContent = state.sourceSuppressedModalId === state.activeModalId ? "Show modal" : "Show page";
+  els.sourceScopeButton.title = state.sourceSuppressedModalId === state.activeModalId
+    ? "Return to the active modal source trail"
+    : "Show all page application sources until this modal closes";
+
+  const oldIndex = sourceMode && state.loadedIndexCount > 0 && state.indexSchemaVersion < FIELD_INDEX_SCHEMA_VERSION;
+  els.sourceNotice.classList.toggle("hidden", !oldIndex);
+  els.sourceNotice.textContent = oldIndex
+    ? "Refresh the component index to enable exact generated-field line links."
+    : "";
 }
 
 function renderChangeSummary() {
@@ -731,6 +1070,7 @@ function renderChangeSummary() {
 }
 
 function getDisplayTree(tree) {
+  if (state.ownerFilter === "components") return state.sourceTree || [];
   if (!state.focusRootId) return tree || [];
   const focused = state.flatById.get(state.focusRootId);
   return focused ? [focused] : tree || [];
@@ -745,7 +1085,7 @@ function renderTreeList(nodes) {
   list.className = "tree-list";
 
   for (const node of nodes) {
-    const sourceResult = window.GIGSourceLoader.findSource(node, state.sourceIndex);
+    const sourceResult = getNodeSourceResult(node);
     const source = sourceResult.source || {};
     const owner = getNodeOwner(node, sourceResult);
     const item = document.createElement("li");
@@ -770,15 +1110,23 @@ function renderTreeList(nodes) {
     const label = document.createElement("span");
     label.className = "tree-label";
     const secondary = node.componentClassName || source.className || "";
+    const primaryLabel = node.displayName || node.selector;
     label.innerHTML = `
-      <span class="selector">${highlightText(node.selector)}</span>
+      <span class="selector">${highlightText(primaryLabel)}</span>
       ${secondary ? `<span class="secondary">${highlightText(secondary)}</span>` : ""}
       ${node.runtimeTitle ? `<span class="runtime-title">${highlightText(node.runtimeTitle)}</span>` : ""}
     `;
 
     const badges = document.createElement("span");
     badges.className = "badges";
-    badges.appendChild(createBadge(owner === "created" ? "App" : owner === "framework" ? "GNG" : node.kind, owner));
+    const virtualBadge = node.virtualType === "field"
+      ? "Field"
+      : node.virtualType === "generated-form"
+        ? "Generated"
+        : node.virtualType === "custom-modal"
+          ? "Modal"
+          : "";
+    badges.appendChild(createBadge(virtualBadge || (owner === "created" ? "App" : owner === "framework" ? "GNG" : node.kind), owner));
     if (source.componentTs) badges.appendChild(createBadge("ts", "debug"));
     if (sourceResult.ambiguous) badges.appendChild(createBadge(`${sourceResult.candidates?.length || 0} sources`, "debug"));
 
@@ -788,12 +1136,12 @@ function renderTreeList(nodes) {
       const openFileButton = document.createElement("button");
       openFileButton.className = "icon-button icon-button-code tree-action-button";
       openFileButton.type = "button";
-      openFileButton.title = "Open component in VS Code";
-      openFileButton.setAttribute("aria-label", "Open component in VS Code");
+      openFileButton.title = node.virtualType === "field" ? "Open field definition in VS Code" : "Open source in VS Code";
+      openFileButton.setAttribute("aria-label", openFileButton.title);
       openFileButton.dataset.treeAction = "open";
       openFileButton.innerHTML = iconSvg("code");
       actions.appendChild(openFileButton);
-    } else if (isMeaningfulFrameworkNode(node)) {
+    } else if (!node.isVirtual && isMeaningfulFrameworkNode(node)) {
       const owner = getNearestResolvedAncestor(node.id);
       const ownerTemplate = owner ? getNodeSource(owner).templateUrl : "";
       if (ownerTemplate) {
@@ -836,14 +1184,16 @@ function renderTreeList(nodes) {
     pinButton.innerHTML = iconSvg(isPinned(node) ? "pinFilled" : "pin");
     actions.appendChild(pinButton);
 
-    const focusButton = document.createElement("button");
-    focusButton.className = "icon-button icon-button-focus tree-action-button";
-    focusButton.type = "button";
-    focusButton.title = "Focus this component and children";
-    focusButton.setAttribute("aria-label", "Focus this component and children");
-    focusButton.dataset.treeAction = "focus";
-    focusButton.innerHTML = iconSvg("focus");
-    actions.appendChild(focusButton);
+    if (!node.isVirtual) {
+      const focusButton = document.createElement("button");
+      focusButton.className = "icon-button icon-button-focus tree-action-button";
+      focusButton.type = "button";
+      focusButton.title = "Focus this component and children";
+      focusButton.setAttribute("aria-label", "Focus this component and children");
+      focusButton.dataset.treeAction = "focus";
+      focusButton.innerHTML = iconSvg("focus");
+      actions.appendChild(focusButton);
+    }
 
     row.append(arrow, label, actions, badges);
 
@@ -900,6 +1250,7 @@ function getComponentPath(id) {
 }
 
 function getNodeSourceResult(node) {
+  if (node?.sourceResult) return node.sourceResult;
   return window.GIGSourceLoader.findSource(node, state.sourceIndex);
 }
 
@@ -928,21 +1279,31 @@ function getNearestIndexedComponent(id) {
 }
 
 function syncSelectionWithActiveFilter() {
-  if (!state.selectedId) return;
   if (state.ownerFilter === "components") {
-    const selectedNode = state.flatById.get(state.selectedId);
-    if (selectedNode && isSourceVisibleInComponents(selectedNode)) {
+    if (state.sourceAutoSelectId && !state.sourceSuppressedModalId) {
+      selectNode(state.sourceAutoSelectId, { reveal: true, keepHighlight: true });
+      return;
+    }
+    const selectedNode = state.selectedId ? state.flatById.get(state.selectedId) : null;
+    if (selectedNode && document.querySelector(`.tree-node[data-id="${cssEscape(selectedNode.id)}"]`)) {
       ensureTreeNodeRendered(selectedNode.id);
       selectNode(selectedNode.id, { reveal: true, keepHighlight: true });
       return;
     }
-    const indexedNode = getNearestIndexedComponent(state.selectedId);
+    const indexedNode = state.sourceOwnerId
+      ? state.flatById.get(state.sourceOwnerId)
+      : state.selectedId
+        ? getNearestIndexedComponent(state.selectedId)
+        : null;
     if (indexedNode) {
       ensureTreeNodeRendered(indexedNode.id);
       selectNode(indexedNode.id, { reveal: true, keepHighlight: indexedNode.id === state.selectedId });
+    } else {
+      showEmptyDetails();
     }
     return;
   }
+  if (!state.selectedId) return;
   if (state.ownerFilter === "all") selectNode(state.selectedId, { reveal: true, keepHighlight: true });
 }
 
@@ -1082,15 +1443,22 @@ function renderDetails(node) {
     return;
   }
 
-  const source = window.GIGSourceLoader.findSource(node, state.sourceIndex);
+  const source = getNodeSourceResult(node);
   const sourceInfo = source.source || {};
   const owner = getNodeOwner(node, source);
 
   els.emptyDetails.classList.add("hidden");
   els.detailsContent.classList.remove("hidden");
-  els.detailsTitle.textContent = node.selector;
+  els.detailsTitle.textContent = node.displayName || node.selector;
   els.detailsBadges.innerHTML = "";
-  els.detailsBadges.appendChild(createBadge(owner === "created" ? "App" : owner === "framework" ? "GNG/framework" : node.kind, owner));
+  const virtualBadge = node.virtualType === "field"
+    ? "Field"
+    : node.virtualType === "generated-form"
+      ? "Generated form"
+      : node.virtualType === "custom-modal"
+        ? "Active modal"
+        : "";
+  els.detailsBadges.appendChild(createBadge(virtualBadge || (owner === "created" ? "App" : owner === "framework" ? "GNG/framework" : node.kind), owner));
   if (sourceInfo.className || node.componentClassName) els.detailsBadges.appendChild(createBadge(sourceInfo.className || node.componentClassName));
   if (sourceInfo.componentTs) els.detailsBadges.appendChild(createBadge("indexed", "debug"));
   if (source.ambiguous) els.detailsBadges.appendChild(createBadge(`${source.candidates?.length || 0} source candidates`, "debug"));
@@ -1158,6 +1526,7 @@ function showEmptyDetails() {
 }
 
 function renderOverview(node, sourceResult) {
+  if (node.sourceTrail) return renderSourceTrailOverview(node, sourceResult);
   const source = sourceResult.source || {};
   const parentComponent = source.componentTs ? null : getNearestResolvedAncestor(node.id);
   const candidates = sourceResult.ambiguous ? sourceResult.candidates || [] : [];
@@ -1289,16 +1658,17 @@ function row(key, value) {
   `;
 }
 
-function pathRow(key, value) {
+function pathRow(key, value, line = null) {
   const text = value || "Not indexed";
+  const displayText = value && line ? `${text}:${line}` : text;
   return `
     <tr>
       <th>${escapeHtml(key)}</th>
       <td>
-        <span class="cell-value">${highlightText(text)}</span>
+        <span class="cell-value">${highlightText(displayText)}</span>
         <span class="row-actions">
-          ${copyButton(text)}
-          ${pathActionButtons(value)}
+          ${copyButton(displayText)}
+          ${pathActionButtons(value, line)}
         </span>
       </td>
     </tr>
@@ -1310,14 +1680,14 @@ function copyButton(value) {
   return iconButton("copy", "Copy value", `data-copy-value="${escapeHtml(value)}"`);
 }
 
-function pathActionButtons(path) {
+function pathActionButtons(path, line = null) {
   if (!path) return "";
   const filePath = resolveProjectPath(path);
   if (!filePath) return "";
   const folderPath = getDirectoryPath(filePath);
   return `
     ${iconButton("folder", "Open directory in VS Code", `data-open-folder="${escapeHtml(folderPath)}"`)}
-    ${iconButton("code", "Open file in VS Code", `data-open-vscode="${escapeHtml(filePath)}"`)}
+    ${iconButton("code", line ? `Open line ${line} in VS Code` : "Open file in VS Code", `data-open-vscode="${escapeHtml(filePath)}"${line ? ` data-open-line="${escapeHtml(line)}"` : ""}`)}
   `;
 }
 
@@ -1424,8 +1794,9 @@ async function selectLastRightClickedComponent() {
     }
 
     if (!result?.ok) throw new Error(result?.message || "Could not find a component for the right-clicked element.");
-    makeNodeSelectableInCurrentView(result.id);
-    selectNode(result.id, { reveal: true });
+    const targetId = mapRawNodeToSourceNode(result.id);
+    makeNodeSelectableInCurrentView(targetId);
+    selectNode(targetId, { reveal: true, keepHighlight: targetId !== result.id });
     activateTab("overview");
     setStatus(`Opened ${result.selector} from page right-click.`);
   } catch (error) {
@@ -1435,6 +1806,12 @@ async function selectLastRightClickedComponent() {
 
 function makeNodeSelectableInCurrentView(id) {
   if (!isNodeHiddenInTree(id)) return;
+
+  if (state.ownerFilter === "components" && state.flatById.get(id)?.isVirtual) {
+    if (els.searchInput.value) els.searchInput.value = "";
+    renderTree(state.scan?.tree || []);
+    return;
+  }
 
   if (state.focusRootId) {
     state.focusRootId = null;
@@ -1451,6 +1828,21 @@ function makeNodeSelectableInCurrentView(id) {
     els.searchInput.value = "";
     applyTreeFilters();
   }
+}
+
+function mapRawNodeToSourceNode(id) {
+  if (state.ownerFilter !== "components") return id;
+  const node = state.flatById.get(id);
+  if (!node) return id;
+  if (node.fieldInfo?.name && state.activeModalId) {
+    const fieldId = `source-field:${state.activeModalId}:${node.fieldInfo.name}`;
+    if (state.flatById.has(fieldId)) return fieldId;
+  }
+  if (state.sourceAutoSelectId && getComponentAncestors(id).some(ancestor => ancestor.id === state.activeModalId)) {
+    return state.sourceAutoSelectId;
+  }
+  const indexedNode = getNearestIndexedComponent(id);
+  return indexedNode && collectTreeIds(state.sourceTree).has(indexedNode.id) ? indexedNode.id : id;
 }
 
 function isNodeHiddenInTree(id) {
@@ -1493,14 +1885,15 @@ function applyTreeFilters() {
   const matchingIds = new Set();
   const visibleItemIds = new Set();
   const ancestorIds = new Set();
+  const sourceTreeIds = collectTreeIds(state.sourceTree);
 
   for (const node of state.flatById.values()) {
-    const sourceResult = window.GIGSourceLoader.findSource(node, state.sourceIndex);
+    const sourceResult = getNodeSourceResult(node);
     const owner = getNodeOwner(node, sourceResult);
     const kindVisible =
       state.ownerFilter === "all" ||
       (state.ownerFilter === "app" && owner === "created") ||
-      (state.ownerFilter === "components" && isSourceVisibleInComponents(node, sourceResult)) ||
+      (state.ownerFilter === "components" && sourceTreeIds.has(node.id)) ||
       (state.ownerFilter === "gng" && owner === "framework");
     if (!kindVisible || (query && !node.searchText?.includes(query))) continue;
 
@@ -1537,10 +1930,18 @@ function applyTreeFilters() {
   const modeLabels = {
     all: "visible",
     app: "app",
-    components: "Components",
+    components: "Source",
     gng: "gng",
   };
   els.componentCount.textContent = `${matchingIds.size}/${totalCount} ${modeLabels[state.ownerFilter] || "visible"}`;
+}
+
+function collectTreeIds(nodes, result = new Set()) {
+  for (const node of nodes || []) {
+    result.add(node.id);
+    collectTreeIds(node.children, result);
+  }
+  return result;
 }
 
 function isSourceVisibleInComponents(node, sourceResult = getNodeSourceResult(node)) {
@@ -1577,8 +1978,9 @@ async function selectInspectedElement() {
     }
 
     if (!result?.ok) throw new Error(result?.message || "Could not find a component for the selected element.");
-    makeNodeSelectableInCurrentView(result.id);
-    selectNode(result.id, { reveal: true });
+    const targetId = mapRawNodeToSourceNode(result.id);
+    makeNodeSelectableInCurrentView(targetId);
+    selectNode(targetId, { reveal: true, keepHighlight: targetId !== result.id });
     activateTab("overview");
     setStatus(`Opened ${result.selector} from the selected Elements node.`);
   } catch (error) {
@@ -1588,7 +1990,7 @@ async function selectInspectedElement() {
 
 function renderSourceCandidates(candidates) {
   const uniqueCandidates = Array.from(
-    new Map(candidates.map(candidate => [candidate.componentTs || candidate.templateUrl, candidate])).values(),
+    new Map(candidates.map(candidate => [`${candidate.componentTs || candidate.templateUrl}:${candidate.selectorLine || ""}`, candidate])).values(),
   ).filter(candidate => candidate.componentTs || candidate.templateUrl);
   if (!uniqueCandidates.length) return "";
   return `
@@ -1596,16 +1998,76 @@ function renderSourceCandidates(candidates) {
     <table class="kv">
       ${uniqueCandidates.map(candidate => {
         const candidatePath = candidate.componentTs || candidate.templateUrl;
+        const candidateDisplay = candidate.selectorLine ? `${candidatePath}:${candidate.selectorLine}` : candidatePath;
         return `
           <tr>
             <th>${highlightText(candidate.className || "Candidate")}</th>
             <td>
-              <span class="cell-value">${highlightText(candidatePath)}</span>
-              <span class="row-actions">${copyButton(candidatePath)}${pathActionButtons(candidatePath)}</span>
+              <span class="cell-value">${highlightText(candidateDisplay)}</span>
+              <span class="row-actions">${copyButton(candidateDisplay)}${pathActionButtons(candidatePath, candidate.selectorLine)}</span>
             </td>
           </tr>
         `;
       }).join("")}
+    </table>
+  `;
+}
+
+function renderSourceTrailOverview(node, sourceResult) {
+  const trail = node.sourceTrail || {};
+  const source = sourceResult.source || {};
+  const ownerNode = trail.ownerId ? state.flatById.get(trail.ownerId) : null;
+  const ownerSource = ownerNode ? getNodeSource(ownerNode) : {};
+
+  if (trail.type === "generated-form") {
+    return `
+      <div class="notice">This modal is generated by GIG from the page column metadata. Edit the page component for orchestration and the column service for fields, layout, LOVs, and validation.</div>
+      <table class="kv">
+        ${row("Runtime title", trail.title || "Not available")}
+        ${trail.titleKey ? row("Title key", trail.titleKey) : ""}
+        ${row("Mode", trail.mode || "Unknown")}
+        ${ownerNode ? parentComponentRow(ownerNode) : ""}
+        ${pathRow("Page component", ownerSource.componentTs)}
+        ${pathRow("Page template", ownerSource.templateUrl)}
+        ${row("Generated by", (trail.generationChain || []).join(" → "))}
+      </table>
+      ${trail.services?.length ? renderRelatedPaths("Column service", trail.services.map(service => service.componentTs)) : '<div class="notice">No related column service was resolved for this page.</div>'}
+      ${state.indexSchemaVersion < FIELD_INDEX_SCHEMA_VERSION ? '<div class="notice">Refresh the component index to add exact field line links.</div>' : ""}
+    `;
+  }
+
+  if (trail.type === "field") {
+    const field = trail.field || {};
+    const exactNotice = trail.exact
+      ? "Exact literal field definition resolved from the runtime dynElement name."
+      : trail.exactMatches?.length > 1
+        ? "The field name occurs more than once. Choose a source candidate; no line was guessed."
+        : "The runtime field was resolved to its related column service, but no unique literal name line was found. No line was guessed.";
+    return `
+      <div class="notice">${escapeHtml(exactNotice)}</div>
+      <table class="kv">
+        ${row("Field name", field.name || node.selector)}
+        ${field.label ? row("Runtime label", field.label) : ""}
+        ${field.i18nName ? row("Translation key", field.i18nName) : ""}
+        ${field.type ? row("Control type", field.type) : ""}
+        ${ownerNode ? parentComponentRow(ownerNode) : ""}
+        ${pathRow("Column service", source.componentTs, trail.exact ? source.selectorLine : null)}
+      </table>
+      ${sourceResult.ambiguous ? renderSourceCandidates(sourceResult.candidates || []) : ""}
+      ${!source.componentTs && trail.services?.length ? renderRelatedPaths("Related column services", trail.services.map(service => service.componentTs)) : ""}
+    `;
+  }
+
+  const contentNode = trail.contentId ? state.flatById.get(trail.contentId) : null;
+  const contentSource = contentNode ? getNodeSource(contentNode) : source;
+  return `
+    <div class="notice">This is a custom modal. Its application component and template are the primary editable sources.</div>
+    <table class="kv">
+      ${node.runtimeTitle ? row("Runtime title", node.runtimeTitle) : ""}
+      ${node.runtimeTitleKey ? row("Title key", node.runtimeTitleKey) : ""}
+      ${ownerNode ? parentComponentRow(ownerNode) : ""}
+      ${pathRow("Modal component", contentSource.componentTs || source.componentTs)}
+      ${pathRow("Modal template", contentSource.templateUrl || source.templateUrl)}
     </table>
   `;
 }
@@ -1628,8 +2090,11 @@ function prepareNodeSearchText(node) {
   const candidates = [...(sourceResult.candidates || []), ...(sourceResult.allCandidates || [])];
   node.searchText = [
     node.selector,
+    node.displayName,
     node.componentClassName,
     node.runtimeTitle,
+    node.runtimeTitleKey,
+    node.fieldInfo && Object.values(node.fieldInfo).join(" "),
     node.elementPath,
     source.className,
     source.componentTs,
@@ -1638,6 +2103,8 @@ function prepareNodeSearchText(node) {
     source.selectorFamily,
     source.styleUrls,
     source.relatedColumnServices,
+    source.fields?.map(field => `${field.name}:${field.line}`).join(" "),
+    node.sourceTrail?.services?.map(service => service.componentTs).join(" "),
     candidates.map(candidate => [candidate.className, candidate.componentTs, candidate.templateUrl].filter(Boolean).join(" ")).join(" "),
     Object.entries(node.attributes || {}).map(([key, value]) => `${key}=${value}`).join(" "),
   ]
@@ -1659,6 +2126,7 @@ function getNodeOwner(node, sourceResult) {
 
 function refreshSourceDependentViews() {
   if (state.scan) {
+    buildSourceTree();
     renderTree(state.scan.tree);
     renderPins();
   } else {

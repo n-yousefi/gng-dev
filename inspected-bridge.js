@@ -1,10 +1,12 @@
 (function installGigComponentInspector() {
   const GLOBAL_KEY = '__gigComponentInspector';
-  const VERSION = 3;
+  const VERSION = 4;
   const DEFAULT_PREFIXES = ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
   const HIGHLIGHT_ID = '__gigComponentInspectorHighlight';
   const IVY_COMPONENT_DEFINITION_KEY = '\u0275cmp';
   const WATCH_LEASE_MS = 4000;
+  const EMPTY_TITLE_INFO = Object.freeze({ title: '', titleKey: '' });
+  const RUNTIME_TITLE_ROLES = ['drawer', 'popup', 'popover', 'tab', 'panel', 'card', 'grid', 'table', 'form', 'lov', 'select'];
 
   const existing = window[GLOBAL_KEY];
   if (existing?.version === VERSION) return existing;
@@ -18,6 +20,7 @@
   let elementIds = new WeakMap();
   let nextElementId = 1;
   let mutationVersion = 0;
+  let modalEntries = new Map();
   let observer = null;
   let watcherLeaseTimer = null;
   let lastContextElement = null;
@@ -36,7 +39,29 @@
     return title.length > 1 ? title : '';
   }
 
-  function getRuntimeTitle(element, component, selector) {
+  function getOwnModalRoot(element) {
+    for (const child of element.children || []) {
+      if (child.classList?.contains('ui-modal') || child.getAttribute?.('role') === 'dialog') return child;
+    }
+    return null;
+  }
+
+  function getRenderedTitle(element, selector) {
+    try {
+      if (/(?:^|-)(?:modal|dialog|drawer|popup|popover)(?:-|$)/i.test(selector)) {
+        const modalRoot = getOwnModalRoot(element);
+        const ownTitle = modalRoot?.querySelector(
+          '.ui-modal-title, .modal-title, .dialog-title, .mat-dialog-title, .mat-mdc-dialog-title, [class*="modal-header"] h1, [class*="modal-header"] h2, [class*="dialog-header"] h1, [class*="dialog-header"] h2',
+        );
+        const title = normalizeRuntimeTitle(ownTitle?.textContent);
+        if (title) return title;
+      }
+    } catch (_error) {}
+    return '';
+  }
+
+  function getRuntimeTitleInfo(element, component, selector) {
+    const renderedTitle = getRenderedTitle(element, selector);
     const attributeNames = [
       'aria-label',
       'title',
@@ -50,28 +75,111 @@
       'ng-reflect-title',
       'ng-reflect-label',
     ];
+    let attributeTitle = '';
     for (const attributeName of attributeNames) {
       const title = normalizeRuntimeTitle(element.getAttribute(attributeName));
-      if (title) return title;
+      if (title) {
+        attributeTitle = title;
+        break;
+      }
     }
 
     const propertyNames = ['modalTitle', 'dialogTitle', 'title', 'label', 'header', 'caption', 'placeholder'];
+    let propertyTitle = '';
     for (const propertyName of propertyNames) {
       try {
         const title = normalizeRuntimeTitle(component?.[propertyName]);
-        if (title) return title;
+        if (title) {
+          propertyTitle = title;
+          break;
+        }
       } catch (_error) {}
     }
 
-    if (!/(?:^|-)(?:modal|dialog|drawer|popup|popover)(?:-|$)/i.test(selector)) return '';
-    try {
-      const titleElement = element.querySelector(
-        '.modal-title, .dialog-title, .mat-dialog-title, .mat-mdc-dialog-title, [class*="modal-header"] h1, [class*="modal-header"] h2, [class*="dialog-header"] h1, [class*="dialog-header"] h2',
-      );
-      return normalizeRuntimeTitle(titleElement?.textContent);
-    } catch (_error) {
-      return '';
+    const title = renderedTitle || attributeTitle || propertyTitle;
+    return {
+      title,
+      titleKey: propertyTitle && propertyTitle !== title ? propertyTitle : '',
+    };
+  }
+
+  function numberValue(value, fallback = 0) {
+    const result = Number(value);
+    return Number.isFinite(result) ? result : fallback;
+  }
+
+  function getFormMode(component) {
+    if (component?.detailView === true || component?.isViewMode === true) return 'View';
+    return component?.isNewItem === true ? 'Create' : 'Edit';
+  }
+
+  function getModalInfo(element, component, titleInfo) {
+    const modalRoot = getOwnModalRoot(element);
+    if (!modalRoot && typeof component?.visible !== 'boolean') return null;
+
+    const renderedVisible = Boolean(modalRoot) && modalRoot.hidden !== true && modalRoot.style?.display !== 'none';
+    const visible = typeof component?.visible === 'boolean' ? component.visible && renderedVisible : renderedVisible;
+    const stackOrder = numberValue(
+      component?.contentzIndex ?? component?.zIndex ?? modalRoot?.style?.zIndex,
+      0,
+    );
+    return {
+      visible,
+      stackOrder,
+      title: titleInfo.title,
+      titleKey: titleInfo.titleKey,
+    };
+  }
+
+  function getGeneratedFormInfo(component) {
+    return {
+      mode: getFormMode(component),
+      isNewItem: component?.isNewItem === true,
+      detailView: component?.detailView === true,
+      gridName: normalizeRuntimeTitle(component?.dataManager?.settings?.gridName),
+    };
+  }
+
+  function serializeField(dynElement, renderedLabel = '') {
+    if (!dynElement || typeof dynElement !== 'object') return null;
+    const name = safeString(dynElement.name, 120).trim();
+    if (!name) return null;
+    return {
+      name,
+      label: normalizeRuntimeTitle(renderedLabel) || normalizeRuntimeTitle(dynElement.title),
+      i18nName: safeString(dynElement.i18nName, 180).trim(),
+      type: safeString(dynElement.type, 80).trim(),
+    };
+  }
+
+  function getDynamicFormInfo(component) {
+    if (!Array.isArray(component?.dynElements)) return null;
+    const isNewItem = component?.isNewItem === true;
+    const fields = component.dynElements
+      .filter(field => isNewItem ? field?.hidden !== true : field?.hiddenEdit !== true)
+      .slice(0, 200)
+      .map(field => serializeField(field))
+      .filter(Boolean);
+    return {
+      mode: getFormMode(component),
+      isNewItem,
+      gridName: normalizeRuntimeTitle(component?.gridName),
+      fields,
+    };
+  }
+
+  function getFieldInfo(component, titleInfo) {
+    return serializeField(component?.dynElement || component?._dynElement, titleInfo.title);
+  }
+
+  function getLightweightActiveModalSignature() {
+    let active = null;
+    for (const [id, entry] of modalEntries) {
+      if (entry.component?.visible !== true) continue;
+      const stackOrder = numberValue(entry.component?.contentzIndex ?? entry.component?.zIndex, 0);
+      if (!active || stackOrder >= active.stackOrder) active = { id, stackOrder };
     }
+    return active ? `${active.id}:${active.stackOrder}` : '';
   }
 
   function normalizeSelectors(selectors) {
@@ -190,9 +298,11 @@
     }
 
     const nextElements = new Map();
+    const nextModalEntries = new Map();
     const idByElement = new WeakMap();
     const componentToElement = new WeakMap();
     const flatNodes = [];
+    let activeModal = null;
 
     for (const candidate of candidates) {
       const { element } = candidate;
@@ -202,21 +312,46 @@
       const selector = getComponentSelector(component) || rawSelector;
       const componentClassName = getAngularClassName(component);
       const kind = getKind(selector);
-      const runtimeTitle = kind === 'library' ? getRuntimeTitle(element, component, selector) : '';
+      const isModalSelector = selector === 'gig-modal' || (
+        kind === 'library' && (selector.endsWith('-modal') || selector.endsWith('-dialog'))
+      );
+      const readsRuntimeTitle = isModalSelector || (
+        selector !== 'app-dynamic-form' && !selector.startsWith('app-form-') &&
+        RUNTIME_TITLE_ROLES.some(role => selector.includes(role))
+      );
+      const titleInfo = readsRuntimeTitle
+        ? getRuntimeTitleInfo(element, component, selector)
+        : EMPTY_TITLE_INFO;
+      const modalInfo = isModalSelector ? getModalInfo(element, component, titleInfo) : null;
+      const generatedFormInfo = selector === 'app-modal-edit-form' ? getGeneratedFormInfo(component) : null;
+      const dynamicFormInfo = selector === 'app-dynamic-form' ? getDynamicFormInfo(component) : null;
+      const fieldInfo = selector.startsWith('app-form-') ? getFieldInfo(component, titleInfo) : null;
 
       nextElements.set(id, element);
       idByElement.set(element, id);
       if (component) componentToElement.set(component, element);
-      flatNodes.push({
+      if (modalInfo) {
+        nextModalEntries.set(id, { element, component });
+        if (modalInfo.visible && (!activeModal || modalInfo.stackOrder >= activeModal.stackOrder)) {
+          activeModal = { id, stackOrder: modalInfo.stackOrder };
+        }
+      }
+      const flatNode = {
         id,
         parentId: null,
         selector,
         rawSelector,
         displayName: componentClassName || readableNameFromSelector(selector),
-        runtimeTitle,
         componentClassName,
         kind,
-      });
+      };
+      if (titleInfo.title) flatNode.runtimeTitle = titleInfo.title;
+      if (titleInfo.titleKey) flatNode.runtimeTitleKey = titleInfo.titleKey;
+      if (modalInfo) flatNode.modalInfo = modalInfo;
+      if (generatedFormInfo) flatNode.generatedFormInfo = generatedFormInfo;
+      if (dynamicFormInfo) flatNode.dynamicFormInfo = dynamicFormInfo;
+      if (fieldInfo) flatNode.fieldInfo = fieldInfo;
+      flatNodes.push(flatNode);
     }
 
     for (let index = 0; index < flatNodes.length; index++) {
@@ -229,6 +364,7 @@
     }
 
     elements = nextElements;
+    modalEntries = nextModalEntries;
     return {
       ok: true,
       version: VERSION,
@@ -236,6 +372,8 @@
       angularDebugApi: Boolean(window.ng),
       count: flatNodes.length,
       mutationVersion,
+      activeModalId: activeModal?.id || null,
+      activeModalSignature: activeModal ? `${activeModal.id}:${activeModal.stackOrder}` : '',
       scanMs: Math.round((performance.now() - startedAt) * 100) / 100,
       flatNodes,
     };
@@ -339,16 +477,21 @@
   function setWatching(enabled) {
     if (!enabled) {
       stopWatcher();
-      return { ok: true, watching: false, mutationVersion };
+      return { ok: true, watching: false, mutationVersion, modalSignature: getLightweightActiveModalSignature() };
     }
     startWatcher();
     renewWatcherLease();
-    return { ok: true, watching: Boolean(observer), mutationVersion };
+    return { ok: true, watching: Boolean(observer), mutationVersion, modalSignature: getLightweightActiveModalSignature() };
   }
 
   function getMutationState() {
     if (observer) renewWatcherLease();
-    return { ok: true, watching: Boolean(observer), mutationVersion };
+    return {
+      ok: true,
+      watching: Boolean(observer),
+      mutationVersion,
+      modalSignature: getLightweightActiveModalSignature(),
+    };
   }
 
   function inspectElementById(id) {
@@ -458,6 +601,7 @@
     document.getElementById(HIGHLIGHT_ID)?.remove();
     elements = new Map();
     elementIds = new WeakMap();
+    modalEntries = new Map();
   }
 
   const api = {

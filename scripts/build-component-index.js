@@ -52,8 +52,30 @@ function normalizeAbsolutePath(filePath) {
 
 function stripComments(text) {
   return text
-    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\r\n]/g, ' '))
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+function readLiteralColumnFields(raw) {
+  const text = stripComments(raw);
+  const fields = [];
+  const seen = new Set();
+  let cursor = 0;
+  let line = 1;
+
+  for (const match of text.matchAll(/\bname\s*:\s*(['"`])([A-Za-z_$][A-Za-z0-9_$.-]*)\1/g)) {
+    for (let index = cursor; index < match.index; index++) {
+      if (text.charCodeAt(index) === 10) line++;
+    }
+    cursor = match.index;
+    const name = match[2];
+    const key = `${name}:${line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fields.push({ name, line });
+  }
+
+  return fields;
 }
 
 function readStringProperty(block, propertyName) {
@@ -132,6 +154,7 @@ function createEntry(item) {
       componentTs,
       componentFileName: path.basename(item.path),
       entryType: 'column-service',
+      fields: readLiteralColumnFields(raw),
     };
   }
 
@@ -226,7 +249,7 @@ function main() {
   }, {});
 
   const payload = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     projectRoot: projectRoot.replace(/\\/g, '/'),
     sourceRoots: sourceRoots.map(sourceRoot => normalizePath(sourceRoot)),
