@@ -34,12 +34,12 @@ const NATIVE_HOST_NAME = "com.gng.dev_indexer";
 const LOCAL_INDEX_FILE = "component-index.json";
 const INDEX_UPDATED_STORAGE_KEY = "gigComponentInspector.indexUpdatedAt";
 const AUTO_REFRESH_DELAY_MS = 600;
-const BRIDGE_VERSION = 4;
+const BRIDGE_VERSION = 6;
 const FIELD_INDEX_SCHEMA_VERSION = 3;
 const MUTATION_POLL_INTERVAL_MS = 1000;
 const MIN_AUTO_SCAN_INTERVAL_MS = 2000;
 const SEARCH_DEBOUNCE_MS = 120;
-const DEFAULT_SCAN_PREFIXES = ["sl-", "gsm-", "gig-", "gng-", "app-"];
+const DEFAULT_SCAN_PREFIXES = ["sl-", "sales-", "gsm-", "gig-", "gng-", "app-"];
 
 const state = {
   bridgeInjected: false,
@@ -59,6 +59,8 @@ const state = {
   collapsedIds: new Set(),
   focusRootId: null,
   parentById: new Map(),
+  sourceParentById: new Map(),
+  rawFieldToVirtualId: new Map(),
   sourceTree: [],
   virtualIds: new Set(),
   activeModalId: null,
@@ -261,21 +263,25 @@ function handleTreeClick(event) {
 
   const action = event.target.closest("[data-tree-action]")?.dataset.treeAction;
   if (action === "toggle") return toggleTreeNode(node.id);
+  if (action === "copy-ai" || action === "copy-path") {
+    const aiText = buildAiAgentCopyText(node);
+    copyText(aiText);
+    const summaryLabel = node.fieldInfo?.name || node.selector;
+    showToast(`Copied AI context for ${summaryLabel}`);
+    return setStatus(`Copied AI location context for ${summaryLabel}.`);
+  }
   if (action === "copy-file") {
     const fileName = getComponentFileName(getNodeSource(node));
     copyText(fileName);
     return setStatus(`Copied ${fileName}.`);
   }
-  if (action === "copy-path") {
-    copyText(getComponentPath(node.id));
-    return setStatus("Copied component path.");
-  }
-  selectNode(node.id, { keepHighlight: node.isVirtual, openPopup: true });
+  selectNode(node.id, { keepHighlight: node.isVirtual && !getHighlightTargetId(node), openPopup: true });
 }
 
 function handleTreeDoubleClick(event) {
   const node = getTreeNodeFromEvent(event);
-  if (node && !node.isVirtual) inspectNode(node.id);
+  const targetId = getHighlightTargetId(node);
+  if (targetId) inspectNode(targetId);
 }
 
 function handleTreeContextMenu(event) {
@@ -309,14 +315,15 @@ function handleTreeMouseOver(event) {
   const row = event.target.closest(".tree-node");
   if (!row || row.contains(event.relatedTarget)) return;
   const node = state.flatById.get(row.dataset.id);
-  if (node && !node.isVirtual) highlightNodeOnPage(node.id, { durationMs: 0 });
+  const targetId = getHighlightTargetId(node);
+  if (targetId) highlightNodeOnPage(targetId, { durationMs: 0 });
 }
 
 function handleTreeMouseOut(event) {
   const row = event.target.closest(".tree-node");
   if (!row || row.contains(event.relatedTarget)) return;
   const node = state.flatById.get(row.dataset.id);
-  if (node && !node.isVirtual) clearPageHighlight();
+  if (getHighlightTargetId(node)) clearPageHighlight();
 }
 
 function handleSearchChanged() {
@@ -462,8 +469,7 @@ async function loadIndexFromNativeHost() {
     const result = await sendNativeMessage({ type: "getIndex", pageUrl });
     if (!result?.ok) throw new Error(result?.error || "Native host could not load the project index.");
     return normalizeIndexManifest(result.index, result.project);
-  } catch (error) {
-    if (!isNativeUnavailableError(error)) throw error;
+  } catch (_error) {
     return null;
   }
 }
@@ -473,7 +479,8 @@ function isNativeUnavailableError(error) {
   return (
     message.includes("native messaging is not available") ||
     message.includes("native messaging host not found") ||
-    message.includes("specified native messaging host not found")
+    message.includes("specified native messaging host not found") ||
+    message.includes("error when communicating with the native messaging host")
   );
 }
 
@@ -569,11 +576,19 @@ async function setPageHighlightEnabled(enabled) {
   }
 }
 
+function getHighlightTargetId(nodeOrId) {
+  const node = typeof nodeOrId === "object" ? nodeOrId : state.flatById.get(nodeOrId);
+  if (!node) return typeof nodeOrId === "string" ? nodeOrId : null;
+  if (!node.isVirtual) return node.id;
+  return node.rawNodeId || node.sourceTrail?.contentId || node.sourceTrail?.modalId || null;
+}
+
 async function highlightNodeOnPage(id, options = {}) {
-  if (!state.highlightEnabled || !id) return;
+  const targetId = getHighlightTargetId(id);
+  if (!state.highlightEnabled || !targetId) return;
   try {
     await ensureBridge();
-    const result = await evalInInspectedPage(`window.__gigComponentInspector.highlightElementById(${JSON.stringify(id)}, ${JSON.stringify(options)})`);
+    const result = await evalInInspectedPage(`window.__gigComponentInspector.highlightElementById(${JSON.stringify(targetId)}, ${JSON.stringify(options)})`);
     if (!result?.ok) throw new Error(result?.message || "Could not highlight element.");
   } catch (error) {
     setStatus(error.message || String(error), true);
@@ -628,6 +643,8 @@ function clearVirtualNodes() {
     state.parentById.delete(id);
   }
   state.virtualIds = new Set();
+  state.sourceParentById = new Map();
+  state.rawFieldToVirtualId = new Map();
   state.sourceAutoSelectId = null;
   state.sourceOwnerId = null;
 }
@@ -654,6 +671,7 @@ function registerVirtualNode(node) {
   state.virtualIds.add(virtualNode.id);
   state.flatById.set(virtualNode.id, virtualNode);
   state.parentById.set(virtualNode.id, virtualNode.parentId || null);
+  state.sourceParentById.set(virtualNode.id, virtualNode.parentId || null);
   prepareNodeSearchText(virtualNode);
   return virtualNode;
 }
@@ -693,22 +711,40 @@ function buildCompactSourceTree() {
       clone.parentId = parent.id;
       parent.children.push(clone);
       parent.childIds.push(clone.id);
+      state.sourceParentById.set(clone.id, parent.id);
     } else {
       clone.parentId = null;
       roots.push(clone);
+      state.sourceParentById.set(clone.id, null);
     }
   }
 
   return roots;
 }
 
+function findOwnDynamicForm(rootNode, activeModalId) {
+  const pending = [...(rootNode?.children || [])];
+  while (pending.length) {
+    const current = pending.shift();
+    if (current.selector === "app-dynamic-form") return current;
+    if (
+      current.id !== activeModalId &&
+      (current.modalInfo || current.selector === "gig-crud-table" || current.selector === "app-modal-edit-form")
+    ) {
+      continue;
+    }
+    pending.unshift(...(current.children || []));
+  }
+  return null;
+}
+
 function getDynamicFormContext(activeModal) {
   const ancestors = getComponentAncestors(activeModal.id);
   const generatedWrapper = [...ancestors].reverse().find(node => node.selector === "app-modal-edit-form") || null;
   const ancestorDynamicForm = [...ancestors].reverse().find(node => node.selector === "app-dynamic-form") || null;
-  const dynamicForm = ancestorDynamicForm || findFirstDescendant(
+  const dynamicForm = ancestorDynamicForm || findOwnDynamicForm(
     generatedWrapper || activeModal,
-    node => node.selector === "app-dynamic-form",
+    activeModal.id,
   );
   if (!generatedWrapper && !dynamicForm) return null;
 
@@ -720,12 +756,20 @@ function getDynamicFormContext(activeModal) {
 
 function mergeRenderedFieldLabels(dynamicForm, fields) {
   const renderedByName = new Map();
+  const rawNodeByName = new Map();
   for (const node of collectDescendants(dynamicForm, item => Boolean(item.fieldInfo?.name))) {
     if (!renderedByName.has(node.fieldInfo.name) || node.fieldInfo.label) {
       renderedByName.set(node.fieldInfo.name, node.fieldInfo);
     }
+    if (!rawNodeByName.has(node.fieldInfo.name)) {
+      rawNodeByName.set(node.fieldInfo.name, node);
+    }
   }
-  return (fields || []).map(field => ({ ...field, ...(renderedByName.get(field.name) || {}) }));
+  return (fields || []).map(field => ({
+    ...field,
+    ...(renderedByName.get(field.name) || {}),
+    rawNodeId: rawNodeByName.get(field.name)?.id || null,
+  }));
 }
 
 function createSourceResult(source, candidates = []) {
@@ -743,7 +787,7 @@ function createSourceResult(source, candidates = []) {
 }
 
 function getPrimaryColumnService(ownerSource, services) {
-  const configured = new Set((ownerSource.relatedColumnServices || []).map(normalizePath));
+  const configured = new Set((ownerSource?.relatedColumnServices || []).map(normalizePath));
   const explicit = (services || []).filter(service => configured.has(normalizePath(service.componentTs)));
   if (explicit.length === 1) return explicit[0];
   return services?.length === 1 ? services[0] : null;
@@ -752,6 +796,7 @@ function getPrimaryColumnService(ownerSource, services) {
 function buildGeneratedModalSourceTree(activeModal, context) {
   const ownerClone = cloneSourceTreeNode(context.owner);
   ownerClone.parentId = null;
+  state.sourceParentById.set(ownerClone.id, null);
   const ownerSource = getNodeSource(context.owner);
   const relatedServices = window.GIGSourceLoader.findRelatedColumnServices(ownerSource, state.columnServices);
   const modalTitle = activeModal.modalInfo?.title || activeModal.runtimeTitle || "Generated CRUD form";
@@ -761,6 +806,7 @@ function buildGeneratedModalSourceTree(activeModal, context) {
   const formNode = registerVirtualNode({
     id: formId,
     parentId: ownerClone.id,
+    rawNodeId: context.dynamicForm?.id || activeModal.id,
     selector: "Generated CRUD form",
     displayName: "Generated CRUD form",
     componentClassName: mode,
@@ -801,6 +847,7 @@ function buildGeneratedModalSourceTree(activeModal, context) {
     const fieldNode = registerVirtualNode({
       id: fieldId,
       parentId: formNode.id,
+      rawNodeId: field.rawNodeId || null,
       selector: field.name,
       displayName: field.name,
       componentClassName: field.type || "field",
@@ -819,6 +866,7 @@ function buildGeneratedModalSourceTree(activeModal, context) {
         services: mapping.services,
       },
     });
+    if (field.rawNodeId) state.rawFieldToVirtualId.set(field.rawNodeId, fieldId);
     formNode.children.push(fieldNode);
     formNode.childIds.push(fieldNode.id);
     if (context.activeField?.fieldInfo?.name === field.name) state.sourceAutoSelectId = fieldNode.id;
@@ -827,30 +875,159 @@ function buildGeneratedModalSourceTree(activeModal, context) {
   return [ownerClone];
 }
 
+function findPageOwnerForDetachedModal(activeModal, contentComponent) {
+  const modalDescendantIds = new Set([
+    activeModal.id,
+    ...collectDescendants(activeModal, () => true).map(node => node.id),
+  ]);
+  const contentSource = contentComponent ? getNodeSource(contentComponent) : {};
+  const contentPath = contentSource.componentTs || "";
+
+  let bestNode = null;
+  let bestScore = -1;
+  for (const node of state.flatById.values()) {
+    if (node.isVirtual || modalDescendantIds.has(node.id)) continue;
+    if (node.insideMatDialog) continue;
+    if (!isIndexedComponent(node)) continue;
+    const nodeSource = getNodeSource(node);
+    if (!nodeSource.componentTs) continue;
+    const shared = contentPath ? sharedDirectoryPrefixDepth(contentPath, nodeSource.componentTs) : 0;
+    const depth = getComponentAncestors(node.id).length;
+    const score = shared * 100 + depth;
+    if (score > bestScore) {
+      bestScore = score;
+      bestNode = node;
+    }
+  }
+  return bestNode;
+}
+
+function appendCustomModalSubtree(rawParent, targetParentClone, currentIndexedOwner, activeModalId) {
+  for (const child of rawParent?.children || []) {
+    if (
+      child.id !== activeModalId &&
+      ((child.modalInfo && !child.modalInfo.visible) || child.selector === "app-modal-edit-form")
+    ) {
+      continue;
+    }
+
+    if (isIndexedComponent(child)) {
+      const childClone = cloneSourceTreeNode(child);
+      childClone.parentId = targetParentClone.id;
+      if (child.fieldInfo?.name && !childClone.runtimeTitle) {
+        childClone.runtimeTitle = child.fieldInfo.label || child.fieldInfo.name;
+      }
+      targetParentClone.children.push(childClone);
+      targetParentClone.childIds.push(childClone.id);
+      state.sourceParentById.set(childClone.id, targetParentClone.id);
+      appendCustomModalSubtree(child, childClone, child, activeModalId);
+      continue;
+    }
+
+    if (
+      child.fieldInfo?.isReactiveControl &&
+      child.fieldInfo.name &&
+      currentIndexedOwner &&
+      currentIndexedOwner.fieldInfo?.name !== child.fieldInfo.name
+    ) {
+      const field = child.fieldInfo;
+      const ownerSource = getNodeSource(currentIndexedOwner);
+      const fieldId = `source-field:${currentIndexedOwner.id}:${field.name}`;
+      if (!state.flatById.has(fieldId)) {
+        const ownerFieldMatch = (ownerSource.fields || []).find(item => item.name === field.name);
+        const mapping = window.GIGSourceLoader.findFieldSources(ownerSource, state.columnServices, field.name);
+        const sameAreaExact = mapping.exact.filter(
+          item => sharedDirectoryPrefixDepth(item.componentTs, ownerSource.componentTs) >= 5,
+        );
+        const exactColumnSource = sameAreaExact.length === 1
+          ? sameAreaExact[0]
+          : (!ownerFieldMatch && mapping.exact.length === 1 ? mapping.exact[0] : null);
+        const resolvedSource = ownerFieldMatch
+          ? { ...ownerSource, selectorLine: ownerFieldMatch.line }
+          : exactColumnSource || (ownerSource.componentTs ? ownerSource : null);
+        const exact = Boolean(ownerFieldMatch || exactColumnSource);
+        const fieldNode = registerVirtualNode({
+          id: fieldId,
+          parentId: targetParentClone.id,
+          rawNodeId: child.id,
+          selector: field.name,
+          displayName: field.name,
+          componentClassName: field.type || child.selector || "field",
+          runtimeTitle: field.label || child.runtimeTitle || "",
+          virtualType: "field",
+          kind: "source-field",
+          fieldInfo: field,
+          sourceResult: createSourceResult(
+            resolvedSource,
+            sameAreaExact.length > 1 ? sameAreaExact : mapping.services,
+          ),
+          sourceTrail: {
+            type: "field",
+            isReactiveControl: true,
+            ownerId: currentIndexedOwner.id,
+            modalId: activeModalId,
+            field,
+            exact,
+            ownerFieldMatch: ownerFieldMatch || null,
+            ownerFieldLine: ownerFieldMatch?.line || null,
+            ownerHtmlLine: ownerFieldMatch?.htmlLine || null,
+            ownerLovLine: ownerFieldMatch?.lovLine || null,
+            columnServiceMatch: exactColumnSource,
+            exactMatches: sameAreaExact,
+            services: mapping.services,
+          },
+        });
+        targetParentClone.children.push(fieldNode);
+        targetParentClone.childIds.push(fieldNode.id);
+        state.sourceParentById.set(fieldNode.id, targetParentClone.id);
+      }
+      state.rawFieldToVirtualId.set(child.id, fieldId);
+      appendCustomModalSubtree(child, targetParentClone, currentIndexedOwner, activeModalId);
+      continue;
+    }
+
+    if (child.selector === "gig-crud-table" && !hasIndexedDescendant(child)) {
+      const tableClone = cloneSourceTreeNode(child);
+      tableClone.parentId = targetParentClone.id;
+      targetParentClone.children.push(tableClone);
+      targetParentClone.childIds.push(tableClone.id);
+      state.sourceParentById.set(tableClone.id, targetParentClone.id);
+      continue;
+    }
+
+    appendCustomModalSubtree(child, targetParentClone, currentIndexedOwner, activeModalId);
+  }
+}
+
 function buildCustomModalSourceTree(activeModal) {
   const contentComponent = findFirstDescendant(activeModal, node => isIndexedComponent(node));
-  const declaringOwner = getNearestIndexedComponent(activeModal.id);
+  const declaringOwner = getNearestIndexedComponent(activeModal.id) || findPageOwnerForDetachedModal(activeModal, contentComponent);
   const primarySourceNode = contentComponent || declaringOwner;
   if (!primarySourceNode) return buildCompactSourceTree();
 
-  const rootNode = declaringOwner ? cloneSourceTreeNode(declaringOwner) : null;
+  const rootNode = declaringOwner && declaringOwner.id !== contentComponent?.id
+    ? cloneSourceTreeNode(declaringOwner)
+    : null;
   if (rootNode) {
     rootNode.parentId = null;
+    state.sourceParentById.set(rootNode.id, null);
     state.sourceOwnerId = rootNode.id;
   }
-  const primarySource = getNodeSource(primarySourceNode);
+  const primarySourceResult = getNodeSourceResult(primarySourceNode);
+  const primarySource = primarySourceResult.source || {};
   const modalId = `source-modal:${activeModal.id}`;
   const modalNode = registerVirtualNode({
     id: modalId,
     parentId: rootNode?.id || null,
+    rawNodeId: contentComponent?.id || activeModal.id,
     selector: "Active custom modal",
     displayName: "Active custom modal",
     componentClassName: primarySource.className || primarySourceNode.componentClassName || "",
-    runtimeTitle: activeModal.modalInfo?.title || activeModal.runtimeTitle || "",
+    runtimeTitle: activeModal.modalInfo?.title || activeModal.runtimeTitle || contentComponent?.runtimeTitle || "",
     runtimeTitleKey: activeModal.modalInfo?.titleKey || activeModal.runtimeTitleKey || "",
     virtualType: "custom-modal",
     kind: "source-modal",
-    sourceResult: createSourceResult(primarySource),
+    sourceResult: createSourceResult(primarySource, primarySourceResult.candidates || []),
     sourceTrail: {
       type: "custom-modal",
       ownerId: declaringOwner?.id || null,
@@ -858,17 +1035,23 @@ function buildCustomModalSourceTree(activeModal) {
       modalId: activeModal.id,
     },
   });
-  state.sourceAutoSelectId = modalNode.id;
+  state.sourceAutoSelectId = contentComponent?.id || modalNode.id;
+
+  if (contentComponent && contentComponent.id !== rootNode?.id) {
+    const contentClone = cloneSourceTreeNode(contentComponent);
+    contentClone.parentId = modalNode.id;
+    modalNode.children.push(contentClone);
+    modalNode.childIds.push(contentClone.id);
+    state.sourceParentById.set(contentClone.id, modalNode.id);
+    appendCustomModalSubtree(contentComponent, contentClone, contentComponent, activeModal.id);
+  } else {
+    appendCustomModalSubtree(activeModal, modalNode, primarySourceNode, activeModal.id);
+  }
 
   if (rootNode) {
     rootNode.children.push(modalNode);
     rootNode.childIds.push(modalNode.id);
-    if (contentComponent && contentComponent.id !== rootNode.id) {
-      const contentClone = cloneSourceTreeNode(contentComponent);
-      contentClone.parentId = modalNode.id;
-      modalNode.children.push(contentClone);
-      modalNode.childIds.push(contentClone.id);
-    }
+    state.sourceParentById.set(modalNode.id, rootNode.id);
     return [rootNode];
   }
   return [modalNode];
@@ -974,8 +1157,8 @@ async function refresh() {
     state.scan = { ...result, tree: tree.roots };
     state.flatById = tree.nodesById;
     state.scanDiff = computeScanDiff(previousScan, result);
-    for (const node of state.flatById.values()) prepareNodeSearchText(node);
     state.parentById = new Map(Array.from(state.flatById.values(), node => [node.id, node.parentId || null]));
+    for (const node of state.flatById.values()) prepareNodeSearchText(node);
     state.lastMutationVersion = result.mutationVersion ?? state.lastMutationVersion ?? 0;
     state.lastModalSignature = result.activeModalSignature || "";
     state.activeModalId = result.activeModalId || null;
@@ -1171,8 +1354,14 @@ function renderTreeList(nodes) {
 
     const label = document.createElement("span");
     label.className = "tree-label";
-    const secondary = node.componentClassName || source.className || "";
+    const baseSecondary = node.componentClassName || source.className || "";
     const primaryLabel = node.displayName || node.selector;
+    const controlFieldName = !node.isVirtual && node.fieldInfo?.name && node.fieldInfo.name !== primaryLabel
+      ? node.fieldInfo.name
+      : "";
+    const secondary = controlFieldName && baseSecondary && controlFieldName !== baseSecondary
+      ? `${controlFieldName} · ${baseSecondary}`
+      : (controlFieldName || baseSecondary);
     label.innerHTML = `
       <span class="selector">${highlightText(primaryLabel)}</span>
       ${secondary ? `<span class="secondary">${highlightText(secondary)}</span>` : ""}
@@ -1194,26 +1383,15 @@ function renderTreeList(nodes) {
 
     const actions = document.createElement("span");
     actions.className = "tree-actions";
-    const componentFileName = getComponentFileName(source);
-    if (componentFileName) {
-      const copyFileNameButton = document.createElement("button");
-      copyFileNameButton.className = "icon-button icon-button-copy tree-action-button";
-      copyFileNameButton.type = "button";
-      copyFileNameButton.title = `Copy ${componentFileName}`;
-      copyFileNameButton.setAttribute("aria-label", `Copy ${componentFileName}`);
-      copyFileNameButton.dataset.treeAction = "copy-file";
-      copyFileNameButton.innerHTML = iconSvg("copy");
-      actions.appendChild(copyFileNameButton);
-    } else {
-      const copyPathButton = document.createElement("button");
-      copyPathButton.className = "icon-button icon-button-copy tree-action-button";
-      copyPathButton.type = "button";
-      copyPathButton.title = "Copy component path";
-      copyPathButton.setAttribute("aria-label", "Copy component path");
-      copyPathButton.dataset.treeAction = "copy-path";
-      copyPathButton.innerHTML = iconSvg("copy");
-      actions.appendChild(copyPathButton);
-    }
+    const copyAiButton = document.createElement("button");
+    copyAiButton.className = "icon-button icon-button-copy tree-action-button";
+    copyAiButton.type = "button";
+    const copyTargetName = node.fieldInfo?.name || getComponentFileName(source) || node.selector;
+    copyAiButton.title = `Copy AI context for ${copyTargetName}`;
+    copyAiButton.setAttribute("aria-label", `Copy AI context for ${copyTargetName}`);
+    copyAiButton.dataset.treeAction = "copy-ai";
+    copyAiButton.innerHTML = iconSvg("copy");
+    actions.appendChild(copyAiButton);
 
     row.append(arrow, label, actions, badges);
 
@@ -1269,9 +1447,372 @@ function getComponentPath(id) {
     .join(" > ");
 }
 
+function formatPathWithLine(filePath, line = null) {
+  if (!filePath) return "";
+  return line ? `${filePath}:${line}` : filePath;
+}
+
+function resolveLovColumnServiceLine(servicePath, methodName) {
+  if (!servicePath) return null;
+  const normalized = normalizePath(servicePath);
+  const service = (state.columnServices || []).find(item => normalizePath(item.componentTs) === normalized);
+  if (!service?.fields?.length) return null;
+  if (methodName) {
+    const direct = service.fields.find(item => item.name === methodName);
+    if (direct?.line) return direct.line;
+  }
+  const fallbackGrid = service.fields.find(item => item.name === "getGridColumns" || item.name === "getLovColumns");
+  return fallbackGrid?.line || null;
+}
+
+function resolveNodeAiContext(node) {
+  if (!node) return null;
+  const rawNode = (node.isVirtual && node.rawNodeId ? state.flatById.get(node.rawNodeId) : null) || node;
+  const ancestors = getComponentAncestors(rawNode.id);
+  const selectorPath = getComponentPath(rawNode.id);
+  const trail = node.sourceTrail || {};
+
+  const formFieldAncestor = [...ancestors].reverse().find(item => item.selector?.startsWith("app-form-") && item.fieldInfo?.name) || null;
+  const dynamicFormAncestor = [...ancestors].reverse().find(item => item.selector === "app-dynamic-form" || item.selector === "app-modal-edit-form") || null;
+  const isGeneratedField = (trail.type === "field" && !trail.isReactiveControl) || Boolean(formFieldAncestor && dynamicFormAncestor);
+
+  if (isGeneratedField) {
+    const field = trail.field || formFieldAncestor?.fieldInfo || rawNode.fieldInfo || {};
+    const fieldName = field.name || (node.virtualType === "field" ? node.selector : "");
+    const label = field.label || rawNode.runtimeTitle || formFieldAncestor?.runtimeTitle || node.runtimeTitle || "";
+    const i18nKey = field.i18nName || rawNode.runtimeTitleKey || formFieldAncestor?.runtimeTitleKey || "";
+    const ownerNode = (trail.ownerId && state.flatById.get(trail.ownerId)) ||
+      (dynamicFormAncestor ? getNearestIndexedComponent(dynamicFormAncestor.id) : getNearestIndexedComponent(rawNode.id));
+    const ownerSource = ownerNode ? getNodeSource(ownerNode) : {};
+    const mapping = window.GIGSourceLoader.findFieldSources(ownerSource, state.columnServices, fieldName);
+
+    return {
+      scenario: "generated-field",
+      targetSelector: rawNode.selector,
+      wrapperSelector: formFieldAncestor && formFieldAncestor.selector !== rawNode.selector ? formFieldAncestor.selector : "",
+      fieldName,
+      label,
+      i18nKey,
+      selectorPath,
+      ownerNode,
+      ownerSource,
+      exactColumnMatches: mapping.exact || [],
+      relatedColumnServices: mapping.services || [],
+      lovInfo: rawNode.lovInfo || null,
+    };
+  }
+
+  const controlAncestorWithField = [...ancestors].reverse().find(item => item.fieldInfo?.name) || (node.fieldInfo?.name ? node : null);
+  const field = trail.field || controlAncestorWithField?.fieldInfo || rawNode.fieldInfo || null;
+  const isCrudTable = rawNode.selector === "gig-crud-table";
+  const isLovOrControl = Boolean(
+    (trail.type === "field" && trail.isReactiveControl) ||
+    field?.name ||
+    isCrudTable ||
+    rawNode.selector === "gig-lov" ||
+    rawNode.selector?.endsWith("-lov") ||
+    rawNode.lovInfo,
+  );
+
+  if (isLovOrControl) {
+    const fieldName = field?.name || (isCrudTable ? "gig-crud-table" : "");
+    const indexedAncestors = ancestors.filter(item => isIndexedComponent(item));
+    let hostOwnerNode = (trail.ownerId && state.flatById.get(trail.ownerId)) || indexedAncestors[indexedAncestors.length - 1] || null;
+    let wrapperNode = null;
+
+    if (!trail.ownerId && indexedAncestors.length >= 2) {
+      const deepestIndexed = indexedAncestors[indexedAncestors.length - 1];
+      const parentIndexed = indexedAncestors[indexedAncestors.length - 2];
+      const parentSource = getNodeSource(parentIndexed);
+      const parentHasField = fieldName && (parentSource.fields || []).some(item => item.name === fieldName);
+      const deepestIsWrapper = Boolean(deepestIndexed.fieldInfo?.name || deepestIndexed.selector?.endsWith("-lov"));
+      if (parentHasField || deepestIsWrapper) {
+        hostOwnerNode = parentIndexed;
+        wrapperNode = deepestIndexed;
+      }
+    }
+
+    const hostOwnerSource = hostOwnerNode ? getNodeSource(hostOwnerNode) : {};
+    const wrapperSource = wrapperNode ? getNodeSource(wrapperNode) : null;
+    let indexedField = trail.ownerFieldMatch ||
+      (fieldName ? (hostOwnerSource.fields || []).find(item => item.name === fieldName) : null) ||
+      null;
+
+    if (!indexedField && !fieldName && rawNode.selector === "gig-lov" && hostOwnerNode) {
+      const allLovNodesInOwner = collectDescendants(hostOwnerNode, item => item.selector === "gig-lov" && !item.fieldInfo?.name);
+      const lovFieldsWithoutControl = (hostOwnerSource.fields || []).filter(item => !item.line && (item.lovLine || item.ref));
+      const lovIndex = allLovNodesInOwner.findIndex(item => item.id === rawNode.id);
+      if (lovIndex >= 0 && lovIndex < lovFieldsWithoutControl.length) {
+        indexedField = lovFieldsWithoutControl[lovIndex];
+      }
+    }
+
+    const resolvedFieldName = fieldName || indexedField?.name || "";
+    const label = field?.label || rawNode.runtimeTitle || controlAncestorWithField?.runtimeTitle || node.runtimeTitle || "";
+    const i18nKey = field?.i18nName || rawNode.runtimeTitleKey || controlAncestorWithField?.runtimeTitleKey || "";
+    const htmlLine = indexedField?.htmlLine || trail.ownerHtmlLine || null;
+    const tsLine = indexedField?.line || trail.ownerFieldLine || null;
+    const lovLine = indexedField?.lovLine || trail.ownerLovLine || null;
+    const ref = indexedField?.ref || "";
+    const configProp = indexedField?.configProp || "";
+    const lovService = indexedField?.lovService || "";
+    const lovMethod = indexedField?.lovMethod || "";
+    const lovServiceLine = resolveLovColumnServiceLine(lovService, lovMethod);
+
+    const mapping = resolvedFieldName && resolvedFieldName !== "gig-crud-table"
+      ? window.GIGSourceLoader.findFieldSources(hostOwnerSource, state.columnServices, resolvedFieldName)
+      : { exact: [], services: window.GIGSourceLoader.findRelatedColumnServices(hostOwnerSource, state.columnServices) };
+    const sameAreaExact = (mapping.exact || []).filter(
+      item => sharedDirectoryPrefixDepth(item.componentTs, hostOwnerSource.componentTs) >= 5,
+    );
+    const ownerColumnMatches = sameAreaExact.length ? sameAreaExact : (mapping.exact || []);
+
+    return {
+      scenario: isCrudTable ? "crud-table" : "form-control",
+      targetSelector: rawNode.selector,
+      wrapperNode,
+      wrapperSource,
+      fieldName: resolvedFieldName,
+      label,
+      i18nKey,
+      ref,
+      configProp,
+      htmlLine,
+      tsLine,
+      lovLine,
+      lovService,
+      lovMethod,
+      lovServiceLine,
+      selectorPath,
+      ownerNode: hostOwnerNode,
+      ownerSource: hostOwnerSource,
+      ownerColumnMatches,
+      relatedColumnServices: mapping.services || [],
+      lovInfo: rawNode.lovInfo || controlAncestorWithField?.lovInfo || null,
+    };
+  }
+
+  const nodeSourceResult = getNodeSourceResult(node);
+  const nodeSource = nodeSourceResult.source || {};
+  const ownerNode = nodeSource.componentTs ? rawNode : getNearestIndexedComponent(rawNode.id);
+  const ownerSource = nodeSource.componentTs ? nodeSource : (ownerNode ? getNodeSource(ownerNode) : {});
+  const relatedServices = window.GIGSourceLoader.findRelatedColumnServices(ownerSource, state.columnServices);
+
+  return {
+    scenario: "component",
+    targetSelector: rawNode.selector,
+    label: node.runtimeTitle || rawNode.runtimeTitle || "",
+    i18nKey: node.runtimeTitleKey || rawNode.runtimeTitleKey || "",
+    selectorPath,
+    ownerNode,
+    ownerSource,
+    relatedColumnServices: relatedServices,
+  };
+}
+
+function buildAiAgentCopyText(node) {
+  const ctx = resolveNodeAiContext(node);
+  if (!ctx) return getComponentPath(node?.id);
+  const lines = [];
+
+  if (ctx.scenario === "generated-field") {
+    const elementDesc = ctx.wrapperSelector
+      ? `<${ctx.targetSelector}> inside <${ctx.wrapperSelector}>`
+      : `<${ctx.targetSelector}>`;
+    lines.push(`Target: ${elementDesc} (Generated CRUD Form Field: ${ctx.fieldName || "unknown"})`);
+    if (ctx.label || ctx.i18nKey) {
+      lines.push(`Label: ${ctx.label ? `"${ctx.label}"` : ""}${ctx.i18nKey ? `${ctx.label ? " " : ""}(i18n: ${ctx.i18nKey})` : ""}`);
+    }
+    if (ctx.selectorPath) lines.push(`DOM Path: ${ctx.selectorPath}`);
+    if (ctx.ownerSource?.componentTs) {
+      lines.push(`Page Component (${ctx.ownerSource.className || ctx.ownerNode?.selector}): ${formatPathWithLine(ctx.ownerSource.componentTs, ctx.ownerSource.selectorLine)}`);
+    }
+    for (const match of ctx.exactColumnMatches) {
+      lines.push(`Column Service Field (${match.fieldName || ctx.fieldName}): ${formatPathWithLine(match.componentTs, match.selectorLine)}`);
+    }
+    if (!ctx.exactColumnMatches.length && ctx.relatedColumnServices.length) {
+      for (const svc of ctx.relatedColumnServices) {
+        lines.push(`Column Service: ${svc.componentTs}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  if (ctx.scenario === "crud-table" || ctx.scenario === "form-control") {
+    const metaParts = [];
+    if (ctx.fieldName && ctx.fieldName !== ctx.targetSelector) metaParts.push(`formControlName="${ctx.fieldName}"`);
+    if (ctx.ref) metaParts.push(`#${ctx.ref}`);
+    const wrapperDesc = ctx.wrapperNode && ctx.wrapperNode.selector !== ctx.targetSelector
+      ? ` inside <${ctx.wrapperNode.selector}>`
+      : "";
+    lines.push(`Target: <${ctx.targetSelector}>${wrapperDesc}${metaParts.length ? ` (${metaParts.join(" | ")})` : ""}`);
+    if (ctx.label || ctx.i18nKey) {
+      lines.push(`Label: ${ctx.label ? `"${ctx.label}"` : ""}${ctx.i18nKey ? `${ctx.label ? " " : ""}(i18n: ${ctx.i18nKey})` : ""}`);
+    }
+    if (ctx.selectorPath) lines.push(`DOM Path: ${ctx.selectorPath}`);
+    if (ctx.ownerNode || ctx.ownerSource?.componentTs) {
+      const ownerTitle = [ctx.ownerSource?.className, ctx.ownerNode?.selector ? `<${ctx.ownerNode.selector}>` : ""].filter(Boolean).join(" ");
+      if (ownerTitle) lines.push(`Owner Component: ${ownerTitle}`);
+    }
+    if (ctx.ownerSource?.templateUrl) {
+      lines.push(`Template HTML: ${formatPathWithLine(ctx.ownerSource.templateUrl, ctx.htmlLine)}`);
+    }
+    if (ctx.ownerSource?.componentTs) {
+      const tsLabel = ctx.scenario === "crud-table"
+        ? "DataManager TS"
+        : (ctx.tsLine ? `Form Control TS (${ctx.fieldName})` : "Component TS");
+      lines.push(`${tsLabel}: ${formatPathWithLine(ctx.ownerSource.componentTs, ctx.tsLine || ctx.ownerSource.selectorLine)}`);
+    }
+    if (ctx.lovLine && ctx.ownerSource?.componentTs) {
+      const lovLabel = ctx.configProp || (ctx.ref ? `#${ctx.ref}` : ctx.fieldName);
+      lines.push(`LOV Config TS${lovLabel ? ` (${lovLabel})` : ""}: ${formatPathWithLine(ctx.ownerSource.componentTs, ctx.lovLine)}`);
+    }
+    if (ctx.lovService) {
+      lines.push(`LOV Column Service${ctx.lovMethod ? ` (${ctx.lovMethod})` : ""}: ${formatPathWithLine(ctx.lovService, ctx.lovServiceLine)}`);
+    }
+    for (const match of ctx.ownerColumnMatches) {
+      if (ctx.lovService && normalizePath(match.componentTs) === normalizePath(ctx.lovService) && match.selectorLine === ctx.lovServiceLine) {
+        continue;
+      }
+      lines.push(`Owner Column Service (${match.fieldName || ctx.fieldName}): ${formatPathWithLine(match.componentTs, match.selectorLine)}`);
+    }
+    if (!ctx.lovService && !ctx.ownerColumnMatches.length && ctx.relatedColumnServices.length === 1) {
+      lines.push(`Owner Column Service: ${ctx.relatedColumnServices[0].componentTs}`);
+    }
+    if (ctx.wrapperSource?.componentTs) {
+      lines.push(`Wrapper Component (<${ctx.wrapperNode.selector}>): ${formatPathWithLine(ctx.wrapperSource.componentTs, ctx.wrapperSource.selectorLine)}`);
+      if (ctx.wrapperSource.templateUrl) {
+        lines.push(`Wrapper Template HTML: ${ctx.wrapperSource.templateUrl}`);
+      }
+    }
+    if (ctx.lovInfo?.serverUrl) {
+      const endpointExtra = [ctx.lovInfo.getAllAction, ctx.lovInfo.keyValue ? `key=${ctx.lovInfo.keyValue}` : ""].filter(Boolean).join(", ");
+      lines.push(`LOV API: ${ctx.lovInfo.serverUrl}${endpointExtra ? ` (${endpointExtra})` : ""}`);
+    }
+    return lines.join("\n");
+  }
+
+  const compTitle = [ctx.ownerSource?.className, ctx.targetSelector ? `<${ctx.targetSelector}>` : ""].filter(Boolean).join(" ");
+  lines.push(`Component: ${compTitle || ctx.targetSelector}`);
+  if (ctx.label) lines.push(`Title: "${ctx.label}"`);
+  if (ctx.selectorPath) lines.push(`DOM Path: ${ctx.selectorPath}`);
+  if (ctx.ownerSource?.componentTs) {
+    lines.push(`Component TS: ${formatPathWithLine(ctx.ownerSource.componentTs, ctx.ownerSource.selectorLine)}`);
+  }
+  if (ctx.ownerSource?.templateUrl) {
+    lines.push(`Template HTML: ${ctx.ownerSource.templateUrl}`);
+  }
+  if (ctx.relatedColumnServices?.length) {
+    for (const svc of ctx.relatedColumnServices.slice(0, 4)) {
+      lines.push(`Column Service: ${svc.componentTs}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function sharedDirectoryPrefixDepth(pathA, pathB) {
+  if (!pathA || !pathB) return 0;
+  const partsA = normalizePath(pathA).split("/").slice(0, -1);
+  const partsB = normalizePath(pathB).split("/").slice(0, -1);
+  const limit = Math.min(partsA.length, partsB.length);
+  let shared = 0;
+  for (let index = 0; index < limit; index++) {
+    if (partsA[index] !== partsB[index]) break;
+    shared++;
+  }
+  return shared;
+}
+
+function disambiguateSourceCandidates(node, rawResult) {
+  const candidates = rawResult?.candidates || [];
+  if (!rawResult?.ambiguous || candidates.length < 2 || !node) return rawResult;
+
+  let ancestorPath = "";
+  let currentParentId = state.parentById.get(node.id) || node.parentId;
+  while (currentParentId) {
+    const ancestor = state.flatById.get(currentParentId);
+    if (!ancestor) break;
+    const ancestorResult = window.GIGSourceLoader.findSource(ancestor, state.sourceIndex);
+    if (!ancestorResult.ambiguous && ancestorResult.source?.componentTs) {
+      ancestorPath = ancestorResult.source.componentTs;
+      break;
+    }
+    currentParentId = state.parentById.get(currentParentId) || ancestor.parentId;
+  }
+
+  const rawNode = state.flatById.get(node.id) || node;
+  const descendantPaths = [];
+  for (const desc of collectDescendants(rawNode, () => true)) {
+    const descResult = window.GIGSourceLoader.findSource(desc, state.sourceIndex);
+    if (!descResult.ambiguous && descResult.source?.componentTs) {
+      descendantPaths.push(descResult.source.componentTs);
+    }
+  }
+
+  const pagePaths = [];
+  for (const other of state.flatById.values()) {
+    if (other.isVirtual || other.id === node.id || other.insideMatDialog) continue;
+    const otherResult = window.GIGSourceLoader.findSource(other, state.sourceIndex);
+    if (!otherResult.ambiguous && otherResult.source?.componentTs) {
+      pagePaths.push(otherResult.source.componentTs);
+    }
+  }
+
+  let bestCandidate = null;
+  let bestScore = -1;
+  let secondBestScore = -1;
+
+  for (const candidate of candidates) {
+    const candidatePath = candidate.componentTs || candidate.templateUrl || "";
+    if (!candidatePath) continue;
+
+    let score = 0;
+    if (ancestorPath) {
+      score += sharedDirectoryPrefixDepth(candidatePath, ancestorPath) * 1000;
+    }
+    if (descendantPaths.length) {
+      const maxDescShared = Math.max(...descendantPaths.map(path => sharedDirectoryPrefixDepth(candidatePath, path)));
+      score += maxDescShared * 500;
+    }
+    if (pagePaths.length) {
+      const maxPageShared = Math.max(...pagePaths.map(path => sharedDirectoryPrefixDepth(candidatePath, path)));
+      score += maxPageShared * 100;
+    }
+    if (rawNode.hasFormGroup || rawNode.insideMatDialog) {
+      score += (candidate.relatedColumnServices?.length || 0) * 10 + (candidate.styleUrls?.length || 0) * 2;
+    }
+
+    if (score > bestScore) {
+      secondBestScore = bestScore;
+      bestScore = score;
+      bestCandidate = candidate;
+    } else if (score > secondBestScore) {
+      secondBestScore = score;
+    }
+  }
+
+  if (bestCandidate && bestScore > secondBestScore) {
+    return {
+      ...rawResult,
+      found: Boolean(bestCandidate.templateUrl || bestCandidate.componentTs),
+      source: bestCandidate,
+      ambiguous: false,
+      disambiguated: true,
+    };
+  }
+
+  return rawResult;
+}
+
 function getNodeSourceResult(node) {
-  if (node?.sourceResult) return node.sourceResult;
-  return window.GIGSourceLoader.findSource(node, state.sourceIndex);
+  if (!node) return window.GIGSourceLoader.findSource(node, state.sourceIndex);
+  if (node.sourceResult) return node.sourceResult;
+  const rawNode = state.flatById.get(node.id) || node;
+  if (rawNode._resolvedSourceResult) return rawNode._resolvedSourceResult;
+  const rawResult = window.GIGSourceLoader.findSource(rawNode, state.sourceIndex);
+  const resolved = rawResult.ambiguous ? disambiguateSourceCandidates(rawNode, rawResult) : rawResult;
+  rawNode._resolvedSourceResult = resolved;
+  return resolved;
 }
 
 function isIndexedComponent(node) {
@@ -1497,6 +2038,22 @@ function renderDetails(node) {
 
   if (els.detailsActions) {
     els.detailsActions.innerHTML = "";
+    const aiCtx = resolveNodeAiContext(node);
+
+    els.detailsActions.appendChild(
+      createDetailsActionPill(
+        "copy",
+        "Copy for AI",
+        "Copy full file & line context for AI coding agents",
+        () => {
+          copyText(buildAiAgentCopyText(node));
+          showToast(`Copied AI context for ${aiCtx?.fieldName || node.displayName || node.selector}`);
+          setStatus("Copied rich AI agent context to clipboard.");
+        },
+        "primary",
+      ),
+    );
+
     if (sourceInfo.componentTs) {
       const componentPath = resolveProjectPath(sourceInfo.componentTs);
       els.detailsActions.appendChild(
@@ -1512,7 +2069,39 @@ function renderDetails(node) {
             }
             setStatus("Opening file in VS Code.");
           },
-          "primary",
+        ),
+      );
+    } else if (aiCtx?.ownerSource?.componentTs && (aiCtx.lovLine || aiCtx.tsLine)) {
+      const ownerTsPath = resolveProjectPath(aiCtx.ownerSource.componentTs);
+      const targetLine = aiCtx.lovLine || aiCtx.tsLine;
+      els.detailsActions.appendChild(
+        createDetailsActionPill(
+          "code",
+          aiCtx.lovLine ? "LOV .ts" : "Control .ts",
+          `Open ${aiCtx.ownerSource.className || "owner"} .ts at line ${targetLine}`,
+          () => {
+            openVsCodeLocation(ownerTsPath, Number(targetLine), 1);
+            setStatus("Opening control definition in VS Code.");
+          },
+        ),
+      );
+    }
+
+    if (aiCtx?.lovService) {
+      const lovServicePath = resolveProjectPath(aiCtx.lovService);
+      els.detailsActions.appendChild(
+        createDetailsActionPill(
+          "code",
+          "LOV Columns",
+          `Open ${aiCtx.lovService.split("/").pop()}${aiCtx.lovServiceLine ? `:${aiCtx.lovServiceLine}` : ""}`,
+          () => {
+            if (aiCtx.lovServiceLine) {
+              openVsCodeLocation(lovServicePath, Number(aiCtx.lovServiceLine), 1);
+            } else {
+              openVsCodePath(lovServicePath);
+            }
+            setStatus("Opening LOV column service in VS Code.");
+          },
         ),
       );
     }
@@ -1525,22 +2114,54 @@ function renderDetails(node) {
           "Open .html",
           "Open template in VS Code",
           () => {
-            openVsCodePath(templatePath);
+            if (aiCtx?.htmlLine && sourceInfo.templateUrl === aiCtx?.ownerSource?.templateUrl) {
+              openVsCodeLocation(templatePath, Number(aiCtx.htmlLine), 1);
+            } else {
+              openVsCodePath(templatePath);
+            }
             setStatus("Opening template in VS Code.");
           },
         ),
       );
-    } else if (!node.isVirtual && isMeaningfulFrameworkNode(node)) {
-      const ownerAncestor = getNearestResolvedAncestor(node.id);
-      const ownerTemplate = ownerAncestor ? getNodeSource(ownerAncestor).templateUrl : "";
+    } else if (node.isVirtual && node.sourceTrail?.ownerId) {
+      const ownerNode = state.flatById.get(node.sourceTrail.ownerId);
+      const ownerTemplate = ownerNode ? getNodeSource(ownerNode).templateUrl : "";
       if (ownerTemplate) {
         els.detailsActions.appendChild(
           createDetailsActionPill(
             "template",
-            "Owner .html",
+            aiCtx?.htmlLine ? `Owner .html:${aiCtx.htmlLine}` : "Owner .html",
+            "Open the owning component template in VS Code",
+            () => {
+              const resolvedHtml = resolveProjectPath(ownerTemplate);
+              if (aiCtx?.htmlLine) {
+                openVsCodeLocation(resolvedHtml, Number(aiCtx.htmlLine), 1);
+              } else {
+                openVsCodePath(resolvedHtml);
+              }
+              setStatus("Opening the owning component template in VS Code.");
+            },
+          ),
+        );
+      }
+    } else if (!node.isVirtual && isMeaningfulFrameworkNode(node)) {
+      const ownerTemplate = aiCtx?.ownerSource?.templateUrl || (() => {
+        const ownerAncestor = getNearestResolvedAncestor(node.id);
+        return ownerAncestor ? getNodeSource(ownerAncestor).templateUrl : "";
+      })();
+      if (ownerTemplate) {
+        els.detailsActions.appendChild(
+          createDetailsActionPill(
+            "template",
+            aiCtx?.htmlLine ? `Owner .html:${aiCtx.htmlLine}` : "Owner .html",
             "Open the app template that declares this framework component",
             () => {
-              openVsCodePath(resolveProjectPath(ownerTemplate));
+              const resolvedHtml = resolveProjectPath(ownerTemplate);
+              if (aiCtx?.htmlLine) {
+                openVsCodeLocation(resolvedHtml, Number(aiCtx.htmlLine), 1);
+              } else {
+                openVsCodePath(resolvedHtml);
+              }
               setStatus("Opening the owning app template in VS Code.");
             },
           ),
@@ -1567,7 +2188,7 @@ function renderDetails(node) {
       createDetailsActionPill(
         "path",
         "Copy Path",
-        "Copy component path",
+        "Copy DOM selector path",
         () => {
           copyText(getComponentPath(node.id));
           setStatus("Copied component path.");
@@ -1648,19 +2269,36 @@ function showEmptyDetails() {
 function renderOverview(node, sourceResult) {
   if (node.sourceTrail) return renderSourceTrailOverview(node, sourceResult);
   const source = sourceResult.source || {};
-  const parentComponent = source.componentTs ? null : getNearestResolvedAncestor(node.id);
+  const aiCtx = resolveNodeAiContext(node);
+  const parentComponent = aiCtx?.ownerNode && aiCtx.ownerNode.id !== node.id
+    ? aiCtx.ownerNode
+    : (source.componentTs ? null : getNearestResolvedAncestor(node.id));
   const candidates = sourceResult.ambiguous ? sourceResult.candidates || [] : [];
   const styles = source.styleUrls || [];
-  const relatedServices = window.GIGSourceLoader.findRelatedColumnServices(source, state.columnServices);
+  const relatedServices = window.GIGSourceLoader.findRelatedColumnServices(
+    source.componentTs ? source : (aiCtx?.ownerSource || source),
+    state.columnServices,
+  );
+  const isControlScenario = aiCtx && (aiCtx.scenario === "form-control" || aiCtx.scenario === "crud-table" || aiCtx.scenario === "generated-field");
 
   return `
     <table class="kv">
       ${row("Selector", node.selector)}
-      ${node.runtimeTitle ? row("Runtime title", node.runtimeTitle) : ""}
-      ${row("Source class", source.className || "Not indexed")}
+      ${aiCtx?.fieldName && aiCtx.fieldName !== node.selector ? row("Field / Control", `${aiCtx.fieldName}${aiCtx.ref ? ` (#${aiCtx.ref})` : ""}`) : ""}
+      ${(node.runtimeTitle || aiCtx?.label) ? row("Runtime title", node.runtimeTitle || aiCtx.label) : ""}
+      ${aiCtx?.i18nKey ? row("Translation key", aiCtx.i18nKey) : ""}
+      ${row("Source class", source.className || (aiCtx?.ownerSource?.className ? `${aiCtx.ownerSource.className} (Owner)` : "Not indexed"))}
       ${parentComponent ? parentComponentRow(parentComponent) : ""}
-      ${pathRow("Component .ts", source.componentTs)}
-      ${pathRow("Template .html", source.templateUrl)}
+      ${source.componentTs ? pathRow("Component .ts", source.componentTs, source.selectorLine) : ""}
+      ${source.templateUrl ? pathRow("Template .html", source.templateUrl) : ""}
+      ${!source.templateUrl && isControlScenario && aiCtx.ownerSource?.templateUrl ? pathRow("Owner template .html", aiCtx.ownerSource.templateUrl, aiCtx.htmlLine) : ""}
+      ${!source.componentTs && isControlScenario && aiCtx.ownerSource?.componentTs ? pathRow(aiCtx.tsLine ? `Form control .ts (${aiCtx.fieldName})` : "Owner component .ts", aiCtx.ownerSource.componentTs, aiCtx.tsLine || aiCtx.ownerSource.selectorLine) : ""}
+      ${isControlScenario && aiCtx.lovLine && aiCtx.ownerSource?.componentTs ? pathRow(`LOV config .ts${aiCtx.configProp ? ` (${aiCtx.configProp})` : ""}`, aiCtx.ownerSource.componentTs, aiCtx.lovLine) : ""}
+      ${isControlScenario && aiCtx.lovService ? pathRow(`LOV column service${aiCtx.lovMethod ? ` (${aiCtx.lovMethod})` : ""}`, aiCtx.lovService, aiCtx.lovServiceLine) : ""}
+      ${isControlScenario && (aiCtx.ownerColumnMatches || []).map(match => pathRow(`Owner column (${match.fieldName || aiCtx.fieldName})`, match.componentTs, match.selectorLine)).join("")}
+      ${isControlScenario && (aiCtx.exactColumnMatches || []).map(match => pathRow(`Column field (${match.fieldName || aiCtx.fieldName})`, match.componentTs, match.selectorLine)).join("")}
+      ${isControlScenario && aiCtx.wrapperSource?.componentTs && aiCtx.wrapperSource.componentTs !== source.componentTs ? pathRow(`Wrapper (<${aiCtx.wrapperNode.selector}>)`, aiCtx.wrapperSource.componentTs, aiCtx.wrapperSource.selectorLine) : ""}
+      ${aiCtx?.lovInfo?.serverUrl ? row("LOV API", `${aiCtx.lovInfo.serverUrl}${aiCtx.lovInfo.getAllAction ? ` (${aiCtx.lovInfo.getAllAction})` : ""}`) : ""}
       ${row("Children", String(node.childIds?.length || 0))}
     </table>
     ${candidates.length > 1 ? renderSourceCandidates(candidates) : ""}
@@ -1903,12 +2541,26 @@ function openVsCodeLocation(path, line, column) {
   openExternalUrl(`${pathToVsCodeUrl(path)}:${line}:${column}`);
 }
 
+async function ensureFreshScanIfMutated() {
+  if (!state.scan) {
+    await refresh();
+    return;
+  }
+  try {
+    const mutationState = await evalInInspectedPage("window.__gigComponentInspector?.getMutationState()");
+    if (
+      (mutationState?.mutationVersion ?? state.lastMutationVersion) !== state.lastMutationVersion ||
+      (mutationState?.modalSignature || "") !== state.lastModalSignature
+    ) {
+      await refresh();
+    }
+  } catch (_error) {}
+}
+
 async function selectLastRightClickedComponent(sourceLabel = "page right-click") {
   try {
     await ensureBridge();
-    if (!state.scan) {
-      await refresh();
-    }
+    await ensureFreshScanIfMutated();
     let result = await evalInInspectedPage(createScanExpression("selectLastContextComponent"));
 
     if (!result?.ok && result?.needsRefresh) {
@@ -1919,7 +2571,7 @@ async function selectLastRightClickedComponent(sourceLabel = "page right-click")
     if (!result?.ok) throw new Error(result?.message || "Could not find a component for the selected element.");
     const targetId = mapRawNodeToSourceNode(result.id);
     makeNodeSelectableInCurrentView(targetId);
-    selectNode(targetId, { reveal: true, keepHighlight: targetId !== result.id, openPopup: true });
+    selectNode(targetId, { reveal: true, keepHighlight: targetId !== result.id && !getHighlightTargetId(targetId), openPopup: true });
     activateTab("overview");
     setStatus(`Opened ${result.selector} from ${sourceLabel}.`);
   } catch (error) {
@@ -1954,18 +2606,40 @@ function makeNodeSelectableInCurrentView(id) {
 }
 
 function mapRawNodeToSourceNode(id) {
-  if (state.ownerFilter !== "components") return id;
-  const node = state.flatById.get(id);
-  if (!node) return id;
-  if (node.fieldInfo?.name && state.activeModalId) {
-    const fieldId = `source-field:${state.activeModalId}:${node.fieldInfo.name}`;
-    if (state.flatById.has(fieldId)) return fieldId;
+  const ancestors = getComponentAncestors(id);
+  if (!ancestors.length) return id;
+
+  if (state.ownerFilter === "app") {
+    for (let index = ancestors.length - 1; index >= 0; index--) {
+      const candidate = ancestors[index];
+      if (getNodeOwner(candidate, getNodeSourceResult(candidate)) === "created") {
+        return candidate.id;
+      }
+    }
+    return id;
   }
-  if (state.sourceAutoSelectId && getComponentAncestors(id).some(ancestor => ancestor.id === state.activeModalId)) {
+
+  if (state.ownerFilter !== "components") return id;
+
+  const sourceTreeIds = collectTreeIds(state.sourceTree);
+  for (let index = ancestors.length - 1; index >= 0; index--) {
+    const ancestor = ancestors[index];
+    const mappedFieldId = state.rawFieldToVirtualId.get(ancestor.id);
+    if (mappedFieldId && state.flatById.has(mappedFieldId)) return mappedFieldId;
+
+    if (ancestor.fieldInfo?.name && state.activeModalId) {
+      const modalFieldId = `source-field:${state.activeModalId}:${ancestor.fieldInfo.name}`;
+      if (state.flatById.has(modalFieldId)) return modalFieldId;
+    }
+
+    if (sourceTreeIds.has(ancestor.id)) return ancestor.id;
+  }
+
+  if (state.sourceAutoSelectId && ancestors.some(ancestor => ancestor.id === state.activeModalId)) {
     return state.sourceAutoSelectId;
   }
   const indexedNode = getNearestIndexedComponent(id);
-  return indexedNode && collectTreeIds(state.sourceTree).has(indexedNode.id) ? indexedNode.id : id;
+  return indexedNode && sourceTreeIds.has(indexedNode.id) ? indexedNode.id : id;
 }
 
 function isNodeHiddenInTree(id) {
@@ -2024,7 +2698,9 @@ function applyTreeFilters() {
     let currentId = node.id;
     while (currentId) {
       visibleItemIds.add(currentId);
-      const parentId = state.parentById.get(currentId);
+      const parentId = state.ownerFilter === "components" && state.sourceParentById.has(currentId)
+        ? state.sourceParentById.get(currentId)
+        : state.parentById.get(currentId);
       if (parentId) ancestorIds.add(parentId);
       currentId = parentId;
     }
@@ -2032,6 +2708,10 @@ function applyTreeFilters() {
 
   if (state.ownerFilter === "components") {
     for (const id of Array.from(ancestorIds)) {
+      if (sourceTreeIds.has(id)) {
+        matchingIds.add(id);
+        continue;
+      }
       const ancestor = state.flatById.get(id);
       if (!ancestor) continue;
       const sourceResult = getNodeSourceResult(ancestor);
@@ -2092,6 +2772,7 @@ function hasIndexedDescendant(node) {
 async function selectInspectedElement() {
   try {
     await ensureBridge();
+    await ensureFreshScanIfMutated();
     const expression = `window.__gigComponentInspector.selectElement(typeof $0 === "undefined" ? null : $0)`;
     let result = await evalInInspectedPage(expression);
 
@@ -2103,7 +2784,7 @@ async function selectInspectedElement() {
     if (!result?.ok) throw new Error(result?.message || "Could not find a component for the selected element.");
     const targetId = mapRawNodeToSourceNode(result.id);
     makeNodeSelectableInCurrentView(targetId);
-    selectNode(targetId, { reveal: true, keepHighlight: targetId !== result.id, openPopup: true });
+    selectNode(targetId, { reveal: true, keepHighlight: targetId !== result.id && !getHighlightTargetId(targetId), openPopup: true });
     activateTab("overview");
     setStatus(`Opened ${result.selector} from the selected Elements node.`);
   } catch (error) {
@@ -2231,11 +2912,8 @@ async function toggleInspectPicker() {
     return;
   }
   try {
-    if (!state.scan) {
-      await refresh();
-    } else {
-      await ensureBridge();
-    }
+    await ensureBridge();
+    await ensureFreshScanIfMutated();
     const result = await evalInInspectedPage(PICKER_BRIDGE_EXPRESSION);
     if (!result?.ok) throw new Error(result?.message || "Could not activate picker.");
     state.inspectPickerActive = true;
@@ -2336,23 +3014,34 @@ function renderSourceTrailOverview(node, sourceResult) {
 
   if (trail.type === "field") {
     const field = trail.field || {};
-    const exactNotice = trail.exact
-      ? "Exact literal field definition resolved from the runtime dynElement name."
-      : trail.exactMatches?.length > 1
-        ? "The field name occurs more than once. Choose a source candidate; no line was guessed."
-        : "The runtime field was resolved to its related column service, but no unique literal name line was found. No line was guessed.";
+    const isReactive = Boolean(trail.isReactiveControl);
+    const aiCtx = resolveNodeAiContext(node);
+    const exactNotice = isReactive
+      ? (trail.ownerFieldLine
+        ? `Reactive form control (formControlName) resolved to line ${trail.ownerFieldLine} of ${ownerSource.componentFileName || "owning component"}.`
+        : "Reactive form control (formControlName) inside the owning component template.")
+      : (trail.exact
+        ? "Exact literal field definition resolved from the runtime dynElement name."
+        : trail.exactMatches?.length > 1
+          ? "The field name occurs more than once. Choose a source candidate; no line was guessed."
+          : "The runtime field was resolved to its related column service, but no unique literal name line was found. No line was guessed.");
     return `
       <div class="notice">${escapeHtml(exactNotice)}</div>
       <table class="kv">
-        ${row("Field name", field.name || node.selector)}
+        ${row("Field name", `${field.name || node.selector}${aiCtx?.ref ? ` (#${aiCtx.ref})` : ""}`)}
         ${field.label ? row("Runtime label", field.label) : ""}
         ${field.i18nName ? row("Translation key", field.i18nName) : ""}
         ${field.type ? row("Control type", field.type) : ""}
         ${ownerNode ? parentComponentRow(ownerNode) : ""}
-        ${pathRow("Column service", source.componentTs, trail.exact ? source.selectorLine : null)}
+        ${isReactive && ownerSource.templateUrl ? pathRow("Form template .html", ownerSource.templateUrl, aiCtx?.htmlLine || trail.ownerHtmlLine || null) : ""}
+        ${isReactive ? pathRow("Form component .ts", ownerSource.componentTs, aiCtx?.tsLine || trail.ownerFieldLine || ownerSource.selectorLine || null) : ""}
+        ${isReactive && (aiCtx?.lovLine || trail.ownerLovLine) ? pathRow(`LOV config .ts${aiCtx?.configProp ? ` (${aiCtx.configProp})` : ""}`, ownerSource.componentTs, aiCtx?.lovLine || trail.ownerLovLine) : ""}
+        ${isReactive && aiCtx?.lovService ? pathRow(`LOV column service${aiCtx?.lovMethod ? ` (${aiCtx.lovMethod})` : ""}`, aiCtx.lovService, aiCtx.lovServiceLine) : ""}
+        ${!isReactive ? pathRow("Column service", source.componentTs, trail.exact ? source.selectorLine : null) : ""}
+        ${isReactive && trail.columnServiceMatch ? pathRow("Owner column service", trail.columnServiceMatch.componentTs, trail.columnServiceMatch.selectorLine) : ""}
       </table>
       ${sourceResult.ambiguous ? renderSourceCandidates(sourceResult.candidates || []) : ""}
-      ${!source.componentTs && trail.services?.length ? renderRelatedPaths("Related column services", trail.services.map(service => service.componentTs)) : ""}
+      ${!isReactive && !source.componentTs && trail.services?.length ? renderRelatedPaths("Related column services", trail.services.map(service => service.componentTs)) : ""}
     `;
   }
 
@@ -2423,6 +3112,10 @@ function getNodeOwner(node, sourceResult) {
 }
 
 function refreshSourceDependentViews() {
+  for (const node of state.flatById.values()) {
+    delete node._resolvedSourceResult;
+    prepareNodeSearchText(node);
+  }
   if (state.scan) {
     buildSourceTree();
     renderTree(state.scan.tree);

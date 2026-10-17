@@ -1,6 +1,6 @@
 (function createSourceLoader(global) {
-  const FRAMEWORK_PREFIXES = ['gng-', 'gig-', 'gsm-'];
-  const CREATED_PREFIXES = ['sl-', 'app-'];
+  const FRAMEWORK_PREFIXES = ['gng-', 'gig-', 'gsm-', 'mat-'];
+  const CREATED_PREFIXES = ['sl-', 'sales-', 'app-'];
   const FRAMEWORK_APP_SELECTOR_PATTERNS = [
     /^app-modal(?:-|$)/,
     /^app-dynamic-form$/,
@@ -34,6 +34,35 @@
     return match ? `${match[1]}-` : '';
   }
 
+  function parseFieldEntry(field, relatedColumnServices) {
+    if (!field) return null;
+    if (typeof field === 'string') {
+      const [rawName, rawLine, rawHtmlLine] = field.split(':');
+      const name = String(rawName || '').trim();
+      if (!name) return null;
+      return {
+        name,
+        line: Number(rawLine) || null,
+        htmlLine: Number(rawHtmlLine) || null,
+      };
+    }
+    const name = String(field.name || '').trim();
+    if (!name) return null;
+    const lovService = typeof field.lovService === 'number'
+      ? (relatedColumnServices[field.lovService] || '')
+      : normalizePath(field.lovService || '');
+    return {
+      name,
+      line: Number(field.line) || null,
+      htmlLine: Number(field.htmlLine) || null,
+      ref: field.ref ? String(field.ref).trim() : '',
+      lovLine: Number(field.lovLine) || null,
+      configProp: field.configProp ? String(field.configProp).trim() : '',
+      lovService,
+      lovMethod: field.lovMethod ? String(field.lovMethod).trim() : '',
+    };
+  }
+
   function enrichEntry(entry) {
     const componentTs = normalizePath(entry.componentTs);
     const hasIndexedTemplate = Object.prototype.hasOwnProperty.call(entry, 'templateUrl');
@@ -41,6 +70,7 @@
       ? ''
       : normalizePath(hasIndexedTemplate ? entry.templateUrl : templatePathFromComponent(componentTs));
     const family = componentTs ? (entry.selectorFamily || 'created') : (entry.selectorFamily || getSelectorFamily(entry.selector));
+    const relatedColumnServices = (entry.relatedColumnServices || []).map(normalizePath);
     return {
       ...entry,
       selectorFamily: family,
@@ -48,10 +78,10 @@
       componentTs,
       templateUrl,
       styleUrls: (entry.styleUrls || []).map(normalizePath),
-      relatedColumnServices: (entry.relatedColumnServices || []).map(normalizePath),
+      relatedColumnServices,
       fields: (entry.fields || [])
-        .map(field => ({ name: String(field?.name || '').trim(), line: Number(field?.line) || null }))
-        .filter(field => field.name),
+        .map(field => parseFieldEntry(field, relatedColumnServices))
+        .filter(Boolean),
       componentFileName: entry.componentFileName || componentTs.split('/').pop() || '',
     };
   }
@@ -165,6 +195,20 @@
           selectorLine: field.line,
           fieldName: normalizedName,
         });
+      }
+    }
+
+    if (!exact.length && /Id$/i.test(normalizedName)) {
+      const displayName = `${normalizedName}Name`;
+      for (const service of services) {
+        for (const field of service.fields || []) {
+          if (field.name !== displayName || !field.line) continue;
+          exact.push({
+            ...service,
+            selectorLine: field.line,
+            fieldName: displayName,
+          });
+        }
       }
     }
 

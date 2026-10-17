@@ -1,12 +1,32 @@
 (function installGigComponentInspector() {
   const GLOBAL_KEY = '__gigComponentInspector';
-  const VERSION = 4;
-  const DEFAULT_PREFIXES = ['sl-', 'gsm-', 'gig-', 'gng-', 'app-'];
+  const VERSION = 6;
+  const DEFAULT_PREFIXES = ['sl-', 'sales-', 'gsm-', 'gig-', 'gng-', 'app-'];
   const HIGHLIGHT_ID = '__gigComponentInspectorHighlight';
   const IVY_COMPONENT_DEFINITION_KEY = '\u0275cmp';
   const WATCH_LEASE_MS = 4000;
   const EMPTY_TITLE_INFO = Object.freeze({ title: '', titleKey: '' });
-  const RUNTIME_TITLE_ROLES = ['drawer', 'popup', 'popover', 'tab', 'panel', 'card', 'grid', 'table', 'form', 'lov', 'select'];
+  const RUNTIME_TITLE_ROLES = [
+    'drawer',
+    'popup',
+    'popover',
+    'tab',
+    'panel',
+    'card',
+    'grid',
+    'table',
+    'form',
+    'lov',
+    'select',
+    'datepicker',
+    'textbox',
+    'textarea',
+    'toggle',
+    'checkbox',
+    'input',
+    'dialog',
+    'modal',
+  ];
 
   const existing = window[GLOBAL_KEY];
   if (existing?.version === VERSION) return existing;
@@ -40,6 +60,15 @@
   }
 
   function getOwnModalRoot(element) {
+    if (!element) return null;
+    const tag = element.localName;
+    if (
+      tag === 'mat-dialog-container' ||
+      element.classList?.contains('mat-dialog-container') ||
+      element.classList?.contains('mat-mdc-dialog-container')
+    ) {
+      return element;
+    }
     for (const child of element.children || []) {
       if (child.classList?.contains('ui-modal') || child.getAttribute?.('role') === 'dialog') return child;
     }
@@ -48,10 +77,10 @@
 
   function getRenderedTitle(element, selector) {
     try {
-      if (/(?:^|-)(?:modal|dialog|drawer|popup|popover)(?:-|$)/i.test(selector)) {
-        const modalRoot = getOwnModalRoot(element);
+      if (/(?:^|-)(?:modal|dialog|drawer|popup|popover|container)(?:-|$)/i.test(selector)) {
+        const modalRoot = getOwnModalRoot(element) || element;
         const ownTitle = modalRoot?.querySelector(
-          '.ui-modal-title, .modal-title, .dialog-title, .mat-dialog-title, .mat-mdc-dialog-title, [class*="modal-header"] h1, [class*="modal-header"] h2, [class*="dialog-header"] h1, [class*="dialog-header"] h2',
+          '.ui-modal-title, .modal-title, .dialog-title, .mat-dialog-title, .mat-mdc-dialog-title, [class*="modal-header"] h1, [class*="modal-header"] h2, [class*="dialog-header"] h1, [class*="dialog-header"] h2, h4.card-header, .card-header h4, .card-header h5, .card-title',
         );
         const title = normalizeRuntimeTitle(ownTitle?.textContent);
         if (title) return title;
@@ -96,7 +125,17 @@
       } catch (_error) {}
     }
 
-    const title = renderedTitle || attributeTitle || propertyTitle;
+    let labelElementTitle = '';
+    if (!renderedTitle && !attributeTitle && !propertyTitle) {
+      try {
+        const labelEl = element.querySelector(
+          'label, .ui-float-label > label, .mat-form-field-label, .mat-slide-toggle-content, .mat-checkbox-label',
+        );
+        labelElementTitle = normalizeRuntimeTitle(labelEl?.textContent);
+      } catch (_error) {}
+    }
+
+    const title = renderedTitle || attributeTitle || propertyTitle || labelElementTitle;
     return {
       title,
       titleKey: propertyTitle && propertyTitle !== title ? propertyTitle : '',
@@ -113,22 +152,54 @@
     return component?.isNewItem === true ? 'Create' : 'Edit';
   }
 
+  function isElementRenderedVisible(element) {
+    if (!element || element.hidden === true || element.style?.display === 'none') return false;
+    try {
+      const style = window.getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    } catch (_error) {
+      return true;
+    }
+  }
+
+  function getModalStackOrder(element, component, modalRoot) {
+    const direct = numberValue(
+      component?.contentzIndex ?? component?.zIndex ?? modalRoot?.style?.zIndex,
+      NaN,
+    );
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    try {
+      const overlayPane = element.closest?.('.cdk-overlay-pane, .cdk-global-overlay-wrapper') || modalRoot;
+      const zIndex = numberValue(window.getComputedStyle(overlayPane).zIndex, 0);
+      if (zIndex > 0) return zIndex;
+    } catch (_error) {}
+    return element.localName === 'mat-dialog-container' ? 1050 : 0;
+  }
+
   function getModalInfo(element, component, titleInfo) {
     const modalRoot = getOwnModalRoot(element);
     if (!modalRoot && typeof component?.visible !== 'boolean') return null;
 
-    const renderedVisible = Boolean(modalRoot) && modalRoot.hidden !== true && modalRoot.style?.display !== 'none';
+    const renderedVisible = isElementRenderedVisible(modalRoot || element);
     const visible = typeof component?.visible === 'boolean' ? component.visible && renderedVisible : renderedVisible;
-    const stackOrder = numberValue(
-      component?.contentzIndex ?? component?.zIndex ?? modalRoot?.style?.zIndex,
-      0,
-    );
+    const stackOrder = getModalStackOrder(element, component, modalRoot);
     return {
       visible,
       stackOrder,
       title: titleInfo.title,
       titleKey: titleInfo.titleKey,
     };
+  }
+
+  function shouldPreferModal(candidateModal, currentActive) {
+    if (!currentActive) return true;
+    if (currentActive.element && candidateModal.element) {
+      if (currentActive.element.contains(candidateModal.element)) return true;
+      if (candidateModal.element.contains(currentActive.element)) return false;
+    }
+    return candidateModal.stackOrder >= currentActive.stackOrder;
   }
 
   function getGeneratedFormInfo(component) {
@@ -172,14 +243,87 @@
     return serializeField(component?.dynElement || component?._dynElement, titleInfo.title);
   }
 
-  function getLightweightActiveModalSignature() {
-    let active = null;
-    for (const [id, entry] of modalEntries) {
-      if (entry.component?.visible !== true) continue;
-      const stackOrder = numberValue(entry.component?.contentzIndex ?? entry.component?.zIndex, 0);
-      if (!active || stackOrder >= active.stackOrder) active = { id, stackOrder };
+  function getReactiveFieldInfo(element, component, selector, titleInfo) {
+    try {
+      let name = safeString(
+        element.getAttribute('formcontrolname') ||
+        element.getAttribute('ng-reflect-form-control-name') ||
+        (typeof component?.formControlName === 'string' ? component.formControlName : ''),
+        120,
+      ).trim();
+
+      if (!name && window.ng?.getDirectives) {
+        const directives = window.ng.getDirectives(element) || [];
+        for (const dir of directives) {
+          if (dir && ('formDirective' in dir || dir.constructor?.name === 'FormControlName') && dir.name) {
+            name = safeString(dir.name, 120).trim();
+            break;
+          }
+        }
+      }
+
+      if (!name) {
+        name = safeString(
+          element.getAttribute('name') ||
+          element.getAttribute('ng-reflect-name') ||
+          (typeof component?.name === 'string' ? component.name : ''),
+          120,
+        ).trim();
+      }
+
+      if (!name) return null;
+      return {
+        name,
+        label: titleInfo.title || '',
+        i18nName: titleInfo.titleKey || '',
+        type: selector,
+        isReactiveControl: true,
+      };
+    } catch (_error) {
+      return null;
     }
-    return active ? `${active.id}:${active.stackOrder}` : '';
+  }
+
+  function getLovRuntimeInfo(component, selector) {
+    if (!component || (selector !== 'gig-lov' && !selector.endsWith('-lov') && !component.lovObject)) {
+      return null;
+    }
+    try {
+      const lovObj = component.lovObject || component;
+      const serverUrl = safeString(component.serverUrl || component.optionsUrl || lovObj.serverUrl, 160).trim();
+      const gridName = normalizeRuntimeTitle(component.gridName || lovObj.gridName);
+      const getAllAction = safeString(component.getAllAction || lovObj.getAllAction, 80).trim();
+      const keyValue = safeString(component.keyValue || lovObj.keyValue, 80).trim();
+      const info = {};
+      if (serverUrl) info.serverUrl = serverUrl;
+      if (gridName) info.gridName = gridName;
+      if (getAllAction && getAllAction !== 'LookupAsync') info.getAllAction = getAllAction;
+      if (keyValue && keyValue !== 'id') info.keyValue = keyValue;
+      return Object.keys(info).length ? info : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function isModalEntryVisible(entry) {
+    if (!entry?.element || !document.documentElement.contains(entry.element)) return false;
+    const modalRoot = getOwnModalRoot(entry.element);
+    if (!modalRoot && typeof entry.component?.visible !== 'boolean') return false;
+    const renderedVisible = isElementRenderedVisible(modalRoot || entry.element);
+    return typeof entry.component?.visible === 'boolean'
+      ? entry.component.visible && renderedVisible
+      : renderedVisible;
+  }
+
+  function getLightweightActiveModalSignature() {
+    const visibleParts = [];
+    for (const [id, entry] of modalEntries) {
+      if (!isModalEntryVisible(entry)) continue;
+      const modalRoot = getOwnModalRoot(entry.element);
+      const stackOrder = getModalStackOrder(entry.element, entry.component, modalRoot);
+      visibleParts.push(`${id}:${stackOrder}`);
+    }
+    return visibleParts.join('|');
   }
 
   function normalizeSelectors(selectors) {
@@ -236,13 +380,13 @@
   function readableNameFromSelector(selector) {
     if (!selector || !selector.includes('-')) return selector || '';
     const parts = selector.split('-').filter(Boolean);
-    const prefixes = new Set(['sl', 'app', 'gig', 'gng', 'gsm']);
+    const prefixes = new Set(['sl', 'sales', 'app', 'gig', 'gng', 'gsm', 'mat']);
     const startIndex = prefixes.has(parts[0]) ? 1 : 0;
     return parts.slice(startIndex).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('');
   }
 
   function getKind(selector) {
-    if (/^(gig|gng|gsm)-/.test(selector)) return 'library';
+    if (/^(gig|gng|gsm|mat)-/.test(selector)) return 'library';
     return 'app';
   }
 
@@ -250,6 +394,7 @@
     if (!(element instanceof Element)) return false;
     const tag = element.localName;
     if (!tag || !tag.includes('-')) return false;
+    if (tag === 'mat-dialog-container') return true;
     return scanSelectors.has(tag) || scanPrefixes.some(prefix => tag.startsWith(prefix));
   }
 
@@ -312,10 +457,13 @@
       const selector = getComponentSelector(component) || rawSelector;
       const componentClassName = getAngularClassName(component);
       const kind = getKind(selector);
-      const isModalSelector = selector === 'gig-modal' || (
+      const isModalSelector = selector === 'gig-modal' || selector === 'mat-dialog-container' || (
         kind === 'library' && (selector.endsWith('-modal') || selector.endsWith('-dialog'))
       );
-      const readsRuntimeTitle = isModalSelector || (
+      const hasFormControlAttr = element.hasAttribute('formcontrolname') ||
+        element.hasAttribute('ng-reflect-form-control-name') ||
+        Boolean(typeof component?.formControlName === 'string' && component.formControlName);
+      const readsRuntimeTitle = isModalSelector || hasFormControlAttr || (
         selector !== 'app-dynamic-form' && !selector.startsWith('app-form-') &&
         RUNTIME_TITLE_ROLES.some(role => selector.includes(role))
       );
@@ -325,15 +473,19 @@
       const modalInfo = isModalSelector ? getModalInfo(element, component, titleInfo) : null;
       const generatedFormInfo = selector === 'app-modal-edit-form' ? getGeneratedFormInfo(component) : null;
       const dynamicFormInfo = selector === 'app-dynamic-form' ? getDynamicFormInfo(component) : null;
-      const fieldInfo = selector.startsWith('app-form-') ? getFieldInfo(component, titleInfo) : null;
+      const fieldInfo = selector.startsWith('app-form-')
+        ? getFieldInfo(component, titleInfo)
+        : getReactiveFieldInfo(element, component, selector, titleInfo);
+      const lovInfo = getLovRuntimeInfo(component, selector);
 
       nextElements.set(id, element);
       idByElement.set(element, id);
       if (component) componentToElement.set(component, element);
       if (modalInfo) {
         nextModalEntries.set(id, { element, component });
-        if (modalInfo.visible && (!activeModal || modalInfo.stackOrder >= activeModal.stackOrder)) {
-          activeModal = { id, stackOrder: modalInfo.stackOrder };
+        const modalCandidate = { id, stackOrder: modalInfo.stackOrder, element };
+        if (modalInfo.visible && shouldPreferModal(modalCandidate, activeModal)) {
+          activeModal = modalCandidate;
         }
       }
       const flatNode = {
@@ -351,6 +503,11 @@
       if (generatedFormInfo) flatNode.generatedFormInfo = generatedFormInfo;
       if (dynamicFormInfo) flatNode.dynamicFormInfo = dynamicFormInfo;
       if (fieldInfo) flatNode.fieldInfo = fieldInfo;
+      if (lovInfo) flatNode.lovInfo = lovInfo;
+      if (element.closest?.('mat-dialog-container')) flatNode.insideMatDialog = true;
+      if (component?.headerForm || component?.productForm || component?.form || component?.filterForm) {
+        flatNode.hasFormGroup = true;
+      }
       flatNodes.push(flatNode);
     }
 
@@ -373,7 +530,7 @@
       count: flatNodes.length,
       mutationVersion,
       activeModalId: activeModal?.id || null,
-      activeModalSignature: activeModal ? `${activeModal.id}:${activeModal.stackOrder}` : '',
+      activeModalSignature: getLightweightActiveModalSignature(),
       scanMs: Math.round((performance.now() - startedAt) * 100) / 100,
       flatNodes,
     };

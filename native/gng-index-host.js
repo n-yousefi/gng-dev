@@ -184,6 +184,18 @@ function buildIndex(project) {
     throw new Error(result.stderr || result.stdout || `Index script exited with ${result.status}.`);
   }
 
+  try {
+    const v2IndexPath = path.join(EXTENSION_ROOT, 'v2', 'component-index.json');
+    if (fs.existsSync(path.dirname(v2IndexPath))) {
+      fs.copyFileSync(project.outFile, v2IndexPath);
+    }
+    if (path.resolve(project.outFile) !== path.resolve(LOCAL_INDEX_PATH)) {
+      fs.copyFileSync(project.outFile, LOCAL_INDEX_PATH);
+    }
+  } catch (_err) {
+    // Non-fatal if bundled fallback copy fails.
+  }
+
   const index = readIndex(project.outFile);
   return {
     ok: true,
@@ -198,8 +210,10 @@ function buildIndex(project) {
 
 function getIndex(project) {
   if (!fs.existsSync(project.outFile)) return buildIndex(project);
+  const stat = fs.statSync(project.outFile);
+  if (stat.size > 950000) return buildIndex(project);
   const index = readIndex(project.outFile);
-  if (index.schemaVersion !== 2) return buildIndex(project);
+  if ((Number(index.schemaVersion) || 1) < 3) return buildIndex(project);
   return {
     ok: true,
     count: Array.isArray(index.components) ? index.components.filter(entry => entry?.selector).length : 0,
@@ -212,7 +226,11 @@ function getIndex(project) {
 }
 
 function sendMessage(message) {
-  const json = Buffer.from(JSON.stringify(message), 'utf8');
+  let json = Buffer.from(JSON.stringify(message), 'utf8');
+  if (json.length > 1000000 && message?.index?.components) {
+    const trimmedComponents = message.index.components.map(({ styleUrls, ...rest }) => rest);
+    json = Buffer.from(JSON.stringify({ ...message, index: { ...message.index, components: trimmedComponents } }), 'utf8');
+  }
   const header = Buffer.alloc(4);
   header.writeUInt32LE(json.length, 0);
   process.stdout.write(header);
